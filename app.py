@@ -4,62 +4,68 @@ import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
+import time
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Sniper Trading AI - Top 50 Volume")
+st.set_page_config(layout="wide", page_title="Sniper AI - Radar Mode")
 
-# --- FITUR 1: AUTO REFRESH (5 MENIT) ---
-# 300.000 ms = 5 menit. Sniper sabar menunggu target.
+# --- AUTO REFRESH (5 MENIT) ---
 count = st_autorefresh(interval=300 * 1000, key="marketwatcher")
 
-# --- JUDUL & PERSONA ---
-st.title("🦅 Sniper Trading AI (Top 50 Volume)")
-st.caption(f"Mode: High Liquidity Hunting | Auto-Refresh: 5 Menit | Refresh Count: {count}")
+# --- JUDUL ---
+st.title("🦅 Sniper Trading AI (Radar Edition)")
+st.caption(f"Market Scanner & Signal Generator | Refresh: {count}")
 
-# --- FUNGSI SELECT TOP 50 COINS (VOLUME FILTER) ---
-@st.cache_data(ttl=3600) # Cache daftar koin selama 1 jam (Ranking volume tidak berubah tiap detik)
+# --- CACHE DATA ---
+@st.cache_data(ttl=3600)
 def get_top_volume_symbols():
     try:
         exchange = ccxt.bitget()
-        # Ambil semua ticker (harga & volume 24jam)
         tickers = exchange.fetch_tickers()
-        
-        # Filter: Hanya pair USDT & urutkan berdasarkan Quote Volume (Uang yang berputar)
-        # Kita mencari di mana uang besar berada.
         usdt_pairs = []
         for symbol, data in tickers.items():
             if symbol.endswith('/USDT'):
                 vol = data.get('quoteVolume', 0)
                 if vol is not None:
                     usdt_pairs.append({'symbol': symbol, 'volume': vol})
-        
-        # Sortir dari volume terbesar ke terkecil
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        
-        # Ambil 50 besar saja
-        top_50 = [x['symbol'] for x in usdt_pairs[:50]]
-        return top_50
-    except Exception as e:
-        # Fallback jika API gagal
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
+        return [x['symbol'] for x in usdt_pairs[:50]]
+    except:
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-# --- SIDEBAR INPUT ---
-st.sidebar.header("Konfigurasi Sniper")
+# --- FUNGSI ANALISA (CORE LOGIC) ---
+def analyze_symbol(df, risk_reward_ratio):
+    # Indikator
+    df['EMA_200'] = ta.ema(df['close'], length=200)
+    df['RSI'] = ta.rsi(df['close'], length=14)
+    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
-# TOMBOL MANUAL REFRESH
-if st.sidebar.button("🔄 Refresh Data Sekarang"):
-    st.rerun()
-
-# DROPDOWN (HANYA TOP 50)
-with st.spinner("Mengambil Data Top 50 Volume..."):
-    available_symbols = get_top_volume_symbols()
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
     
-symbol = st.sidebar.selectbox(f"Pilih Target (Top 50 by Vol)", available_symbols, index=0)
+    signal = "NEUTRAL"
+    entry = 0.0
+    sl = 0.0
+    tp = 0.0
+    
+    # STRATEGI SNIPER
+    if curr['close'] > curr['EMA_200']:
+        if prev['RSI'] < 45 and curr['RSI'] > 45: # Pullback Buy
+            signal = "LONG"
+            entry = curr['close']
+            sl = entry - (curr['ATR'] * 1.5)
+            tp = entry + ((entry - sl) * risk_reward_ratio)
+            
+    elif curr['close'] < curr['EMA_200']:
+        if prev['RSI'] > 55 and curr['RSI'] < 55: # Pullback Sell
+            signal = "SHORT"
+            entry = curr['close']
+            sl = entry + (curr['ATR'] * 1.5)
+            tp = entry - ((sl - entry) * risk_reward_ratio)
+            
+    return signal, entry, sl, tp
 
-leverage = st.sidebar.slider("Leverage (Saran: 5x-20x)", 1, 50, 10)
-risk_reward = st.sidebar.slider("Risk : Reward Ratio", 1.5, 5.0, 2.0)
-
-# --- FUNGSI FETCH DATA ---
+# --- FUNGSI FETCH ---
 def get_data(symbol, limit=200):
     try:
         exchange = ccxt.bitget()
@@ -67,98 +73,91 @@ def get_data(symbol, limit=200):
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
         return df
-    except Exception as e:
-        st.error(f"Gagal mengambil data {symbol}: {e}")
+    except:
         return None
 
-# --- OTAK ANALISIS (STRATEGI SNIPER) ---
-def analyze_market(df):
-    # Indikator
-    df['EMA_200'] = ta.ema(df['close'], length=200) 
-    df['RSI'] = ta.rsi(df['close'], length=14)      
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+# --- SIDEBAR: RADAR & KONTROL ---
+st.sidebar.header("📡 SNIPER RADAR")
 
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+# Ambil daftar koin
+available_symbols = get_top_volume_symbols()
+
+# TOMBOL SCANNER (FITUR BARU)
+if st.sidebar.button("Pindai 50 Koin Sekarang 🔍"):
+    st.sidebar.write("Sedang memindai pasar...")
+    progress_bar = st.sidebar.progress(0)
+    found_signals = []
     
-    signal = "NEUTRAL"
-    reason = "Menunggu setup A+..."
-    entry = 0.0
-    stop_loss = 0.0
-    take_profit = 0.0
+    # Loop Scanning
+    for i, sym in enumerate(available_symbols):
+        # Update progress
+        progress = (i + 1) / len(available_symbols)
+        progress_bar.progress(progress)
+        
+        # Analisa Cepat
+        df_scan = get_data(sym, limit=205) # Limit dikit aja biar cepet
+        if df_scan is not None:
+            sig, ent, stop, take = analyze_symbol(df_scan, 2.0) # Default RR 2.0 buat scan
+            if sig != "NEUTRAL":
+                found_signals.append({
+                    'symbol': sym, 'signal': sig, 'entry': ent, 'sl': stop, 'tp': take
+                })
+        time.sleep(0.1) # Istirahat dikit biar gak di-banned API
 
-    # LOGIKA SNIPER (KETAT)
-    # Long: Harga > EMA200 & RSI Cross Up 45
-    if curr['close'] > curr['EMA_200']:
-        if prev['RSI'] < 45 and curr['RSI'] > 45: 
-            signal = "LONG"
-            entry = curr['close']
-            stop_loss = entry - (curr['ATR'] * 1.5) 
-            take_profit = entry + ((entry - stop_loss) * risk_reward)
-            reason = "Trend Bullish + Momentum Recovery (Valid Pullback)"
-
-    # Short: Harga < EMA200 & RSI Cross Down 55
-    elif curr['close'] < curr['EMA_200']:
-        if prev['RSI'] > 55 and curr['RSI'] < 55:
-            signal = "SHORT"
-            entry = curr['close']
-            stop_loss = entry + (curr['ATR'] * 1.5)
-            take_profit = entry - ((stop_loss - entry) * risk_reward)
-            reason = "Trend Bearish + Momentum Weakness (Valid Rejection)"
-
-    return signal, entry, stop_loss, take_profit, reason, df
-
-# --- EKSEKUSI UTAMA ---
-df = get_data(symbol)
-
-if df is not None:
-    signal, entry, sl, tp, reason, df_processed = analyze_market(df)
+    # HASIL SCAN
+    st.sidebar.success(f"Selesai! Ditemukan: {len(found_signals)} Sinyal")
     
-    # VISUALISASI
-    last_price = df_processed.iloc[-1]['close']
-    rsi_val = df_processed.iloc[-1]['RSI']
-    
-    # Header Info
-    col_head1, col_head2 = st.columns([3, 1])
-    with col_head1:
-        st.metric(f"{symbol} (15m)", f"${last_price}", delta=f"RSI: {rsi_val:.1f}")
-    with col_head2:
-        if signal == "LONG":
-            st.markdown("### 🟢 LONG")
-        elif signal == "SHORT":
-            st.markdown("### 🔴 SHORT")
-        else:
-            st.markdown("### ⚪ WAIT")
-
-    # Chart
-    fig = go.Figure(data=[go.Candlestick(x=df['time'],
-        open=df['open'], high=df['high'],
-        low=df['low'], close=df['close'], name='Price')])
-    fig.add_trace(go.Scatter(x=df['time'], y=df_processed['EMA_200'], mode='lines', name='EMA 200', line=dict(color='orange')))
-    fig.update_layout(xaxis_rangeslider_visible=False, height=450, margin=dict(t=20, b=20, l=20, r=20))
-    st.plotly_chart(fig, use_container_width=True)
-
-    # AREA SINYAL
-    st.subheader("📋 Kartu Perintah Sniper")
-    
-    # Layout Kartu 4 Kolom
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Entry", f"${entry:.5f}")
-    c2.metric("Stop Loss", f"${sl:.5f}", delta_color="inverse")
-    c3.metric("Take Profit", f"${tp:.5f}")
-    c4.metric("Risk/Reward", f"1 : {risk_reward}")
-    
-    st.info(f"💡 **Logika:** {reason}")
-
-    # MANAJEMEN RISIKO
-    if entry > 0:
-        risk_percent = abs((entry - sl) / entry) * 100 * leverage
-        st.write("---")
-        st.write(f"**Analisa Risiko (Leverage {leverage}x):** {risk_percent:.2f}% dari Margin")
-        if risk_percent > 5:
-            st.error("⛔ STOP! Risiko > 5%. Turunkan Leverage atau Skip.")
-        else:
-            st.success("✅ AMAN. Risiko < 5%. Eksekusi Disetujui.")
+    if len(found_signals) > 0:
+        st.error("🚨 PERHATIAN! SINYAL DITEMUKAN:") # Alert Merah Besar di Atas
+        for item in found_signals:
+            # Tampilkan Alert di Halaman Utama juga
+            if item['signal'] == "LONG":
+                st.success(f"🟢 **{item['symbol']}** (LONG) | Entry: {item['entry']}")
+            else:
+                st.error(f"🔴 **{item['symbol']}** (SHORT) | Entry: {item['entry']}")
     else:
-        st.write("---")
-        st.caption("Menunggu sinyal tervalidasi...")
+        st.sidebar.info("Pasar sunyi. Belum ada mangsa.")
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔬 Analisa Spesifik")
+
+# INPUT USER
+selected_symbol = st.sidebar.selectbox("Pilih Chart", available_symbols)
+leverage = st.sidebar.slider("Leverage", 5, 50, 10)
+rr_ratio = st.sidebar.slider("Risk Ratio", 1.5, 5.0, 2.0)
+
+# --- VISUALISASI UTAMA (CHART PILIHAN) ---
+st.subheader(f"Analisa Detail: {selected_symbol}")
+
+with st.spinner('Memuat data chart...'):
+    df_main = get_data(selected_symbol)
+    
+    if df_main is not None:
+        main_sig, main_ent, main_sl, main_tp = analyze_symbol(df_main, rr_ratio)
+        
+        # Chart
+        # Hitung Indikator buat display chart
+        df_main['EMA_200'] = ta.ema(df_main['close'], length=200)
+        
+        fig = go.Figure(data=[go.Candlestick(x=df_main['time'],
+            open=df_main['open'], high=df_main['high'],
+            low=df_main['low'], close=df_main['close'], name='Price')])
+        fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['EMA_200'], mode='lines', line=dict(color='orange'), name='EMA 200'))
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # INFO SINYAL
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Signal", main_sig, delta="A+ Setup" if main_sig != "NEUTRAL" else "Wait")
+        c2.metric("Entry", f"{main_ent:.4f}")
+        c3.metric("Stop Loss", f"{main_sl:.4f}")
+        c4.metric("Take Profit", f"{main_tp:.4f}")
+        
+        # RISK CALC
+        if main_ent > 0:
+            risk = abs((main_ent - main_sl)/main_ent) * 100 * leverage
+            st.caption(f"⚠️ Risiko Trade: {risk:.2f}% (Leverage {leverage}x)")
+            if risk > 5:
+                st.warning("Risiko Tinggi! Hati-hati.")
+            else:
+                st.success("Risiko Aman.")
