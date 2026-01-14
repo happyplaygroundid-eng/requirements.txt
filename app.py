@@ -8,30 +8,32 @@ import requests
 import time
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Sniper Multi-TF Command Center")
+st.set_page_config(layout="wide", page_title="Sniper Command Center")
 
 # --- AUTO REFRESH (5 MENIT) ---
-# Kita set ke 300 detik (5 menit) agar aman untuk semua timeframe.
-# Untuk TF 5m, ini adalah refresh per candle.
-count = st_autorefresh(interval=300 * 1000, key="radar_sweep_v6")
+# 300 detik = 5 menit. 
+count = st_autorefresh(interval=300 * 1000, key="radar_sweep_final")
 
 # --- JUDUL ---
-st.title("🦅 Sniper Command Center (Multi-Timeframe)")
-st.caption(f"Status: Monitoring 24/7 | Refresh: Tiap 5 Menit | Cycle: {count}")
+st.title("🦅 Sniper Command Center (Final)")
+st.caption(f"Status: Monitoring 24/7 | Cycle: {count}")
 
-# --- SETUP TELEGRAM ---
+# --- SIDEBAR: KONFIGURASI ---
 st.sidebar.header("🔔 Konfigurasi Notifikasi")
 tg_token = st.sidebar.text_input("Bot Token", type="password", help="Dapat dari @BotFather")
 tg_chat_id = st.sidebar.text_input("Chat ID", help="Dapat dari @userinfobot")
 
-# --- KONFIGURASI SNIPER ---
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Setelan Sniper")
 
-# 1. PILIHAN TIMEFRAME
+# 1. TOMBOL MANUAL SCAN (DIKEMBALIKAN)
+if st.sidebar.button("🔄 Pindai Manual Sekarang"):
+    st.rerun() # Memaksa aplikasi refresh dan scan ulang
+
+# 2. PILIHAN TIMEFRAME
 timeframe = st.sidebar.selectbox("Pilih Timeframe (Scope)", ["5m", "15m", "1h"], index=1)
 
-# LOGIKA SARAN LEVERAGE
+# 3. LOGIKA SARAN LEVERAGE
 if timeframe == "5m":
     rec_leverage = "10x - 20x"
     max_rec = 20
@@ -42,28 +44,19 @@ else: # 1h
     rec_leverage = "2x - 5x"
     max_rec = 5
 
-# Tampilkan saran visual
-st.sidebar.info(f"💡 Saran Leverage untuk TF {timeframe}: **{rec_leverage}**")
+st.sidebar.info(f"💡 Saran Leverage TF {timeframe}: **{rec_leverage}**")
 
-# 2. LEVERAGE SLIDER
-# Kita set default value slider mengikuti batas aman (max_rec)
+# 4. LEVERAGE SLIDER (HANYA SATU - NO ERROR)
 leverage = st.sidebar.slider("Leverage", 1, 50, max_rec) 
 
-# Peringatan jika user nekat melebihi saran
 if leverage > max_rec:
     st.sidebar.warning(f"⚠️ Leverage {leverage}x berisiko tinggi di TF {timeframe}!")
 
-# 3. Risk Reward
+# 5. Risk Reward
 risk_reward = st.sidebar.slider("Risk : Reward Ratio", 1.5, 5.0, 2.0)
 
-# 1. PILIHAN TIMEFRAME (FITUR BARU)
-timeframe = st.sidebar.selectbox("Pilih Timeframe (Scope)", ["5m", "15m", "1h"], index=1, help="5m=Cepat, 15m=Normal, 1h=Akurat")
+# --- FUNGSI PENDUKUNG ---
 
-# 2. Leverage & Risk
-leverage = st.sidebar.slider("Leverage", 1, 50, 10)
-risk_reward = st.sidebar.slider("Risk : Reward Ratio", 1.5, 5.0, 2.0)
-
-# Fungsi Kirim Pesan
 def send_telegram_alert(message):
     if tg_token and tg_chat_id:
         try:
@@ -73,7 +66,6 @@ def send_telegram_alert(message):
         except Exception as e:
             st.error(f"Gagal kirim notif: {e}")
 
-# --- CACHE DATA ---
 @st.cache_data(ttl=3600)
 def get_top_volume_symbols():
     try:
@@ -90,9 +82,19 @@ def get_top_volume_symbols():
     except:
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-# --- LOGIKA TRADING (SAMA, TAPI DINAMIS) ---
+def get_data(symbol, tf, limit=200):
+    try:
+        exchange = ccxt.bitget()
+        bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        return df
+    except:
+        return None
+
 def analyze_symbol(df, risk_reward_ratio):
-    # Indikator dihitung berdasarkan Timeframe yg dipilih user
+    if df is None: return "NEUTRAL", 0, 0, 0
+    
     df['EMA_200'] = ta.ema(df['close'], length=200)
     df['RSI'] = ta.rsi(df['close'], length=14)
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -107,14 +109,14 @@ def analyze_symbol(df, risk_reward_ratio):
     
     # STRATEGI SNIPER
     if curr['close'] > curr['EMA_200']:
-        if prev['RSI'] < 45 and curr['RSI'] > 45: # Pullback Buy
+        if prev['RSI'] < 45 and curr['RSI'] > 45: 
             signal = "LONG"
             entry = curr['close']
             sl = entry - (curr['ATR'] * 1.5)
             tp = entry + ((entry - sl) * risk_reward_ratio)
             
     elif curr['close'] < curr['EMA_200']:
-        if prev['RSI'] > 55 and curr['RSI'] < 55: # Pullback Sell
+        if prev['RSI'] > 55 and curr['RSI'] < 55:
             signal = "SHORT"
             entry = curr['close']
             sl = entry + (curr['ATR'] * 1.5)
@@ -122,19 +124,9 @@ def analyze_symbol(df, risk_reward_ratio):
             
     return signal, entry, sl, tp
 
-# --- FETCH DATA (DENGAN INPUT TIMEFRAME) ---
-def get_data(symbol, tf, limit=200):
-    try:
-        exchange = ccxt.bitget()
-        # Fetch candle sesuai timeframe pilihan user
-        bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df['time'] = pd.to_datetime(df['time'], unit='ms')
-        return df
-    except:
-        return None
+# --- CORE LOGIC (SCANNER) ---
+# Scanner ini berjalan setiap kali halaman direfresh (baik oleh Timer, Tombol, atau Ganti TF)
 
-# --- MESIN OTOMATIS (AUTO SCANNER) ---
 available_symbols = get_top_volume_symbols()
 
 st.subheader(f"📡 Radar Activity Log (Timeframe: {timeframe})")
@@ -143,31 +135,29 @@ progress_bar = st.progress(0)
 
 found_signals = []
 
-# Logic Scanner
-with st.spinner(f"Memindai pasar {timeframe}..."):
+with st.spinner(f"Memindai pasar {timeframe} (Top 50)..."):
     for i, sym in enumerate(available_symbols):
+        # Update Progress
         progress = (i + 1) / len(available_symbols)
         progress_bar.progress(progress)
         
-        # PENTING: Pass 'timeframe' ke fungsi get_data
+        # Get Data
         df_scan = get_data(sym, timeframe)
         
         if df_scan is not None:
             sig, ent, stop, take = analyze_symbol(df_scan, 2.0)
             if sig != "NEUTRAL":
-                # Hitung risiko kasar untuk alert
                 risk_alert = abs((ent - stop)/ent) * 100 * leverage
-                
                 found_signals.append(f"**{sig} {sym}** (Risk: {risk_alert:.1f}%)")
                 
-                # KIRIM NOTIFIKASI
+                # SEND ALERT
                 if tg_token and tg_chat_id:
                     msg = f"🚨 **SNIPER ALERT ({timeframe})** 🚨\n\n💎 Coin: {sym}\n🚀 Signal: {sig}\n💰 Entry: ${ent}\n🛑 SL: ${stop:.4f}\n⚖️ Risk: {risk_alert:.2f}%\n\n_Cek chart sekarang!_"
                     send_telegram_alert(msg)
         
+        # Sleep sebentar agar tidak kena limit API
         time.sleep(0.1)
 
-# TAMPILAN HASIL SCAN
 status_text.text(f"Scan {timeframe} Selesai.")
 if len(found_signals) > 0:
     st.error(f"DITEMUKAN {len(found_signals)} SINYAL di TF {timeframe}!")
@@ -183,15 +173,14 @@ st.sidebar.markdown("---")
 st.sidebar.header("🔍 Cek Manual")
 selected_symbol = st.sidebar.selectbox("Pilih Chart Detail", available_symbols)
 
-# (Visualisasi Chart)
-df_main = get_data(selected_symbol, timeframe) # Pass timeframe
+df_main = get_data(selected_symbol, timeframe)
 
 if df_main is not None:
     main_sig, main_ent, main_sl, main_tp = analyze_symbol(df_main, 2.0)
     
     st.write(f"### Analisa: {selected_symbol} ({timeframe})")
     
-    # Chart
+    # Chart Visual
     df_main['EMA_200'] = ta.ema(df_main['close'], length=200)
     fig = go.Figure(data=[go.Candlestick(x=df_main['time'], open=df_main['open'], high=df_main['high'], low=df_main['low'], close=df_main['close'], name='Price')])
     fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['EMA_200'], mode='lines', line=dict(color='orange'), name='EMA 200'))
@@ -202,14 +191,13 @@ if df_main is not None:
     c2.metric("Entry", f"${main_ent}")
     c3.metric("Stop Loss", f"${main_sl}")
     
-    # MANAJEMEN RISIKO DINAMIS
+    # Risk Calc
     if main_ent > 0:
         risk_percent = abs((main_ent - main_sl) / main_ent) * 100 * leverage
         st.markdown(f"**⚠️ Analisa Risiko (Leverage {leverage}x): {risk_percent:.2f}%**")
         
         if risk_percent > 5:
              st.error("⛔ RISIKO TINGGI. Turunkan Leverage!")
-             # Pesan khusus untuk TF besar
              if timeframe == "1h":
                  st.caption("ℹ️ Tips: Di Timeframe 1 Jam, jarak SL (ATR) lebih lebar. Gunakan leverage kecil (2x-5x).")
         else:
