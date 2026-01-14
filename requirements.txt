@@ -3,4 +3,3 @@ ccxt
 pandas
 pandas_ta
 plotly
-streamlit-autorefresh
