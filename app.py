@@ -120,12 +120,20 @@ if st.button("Analisa Pasar Sekarang"):
             # ALASAN (BRAIN ANALYSIS)
             st.caption(f"📝 **Logika AI:** {reason}")
             
-            # RUMUS POSISI (MENGHITUNG RISIKO)
+           # RUMUS POSISI (MENGHITUNG RISIKO)
             st.markdown("---")
             st.write("### 🛡️ Manajemen Risiko (Wajib Baca)")
-            risk_percent = abs((entry - sl) / entry) * 100 * leverage
-            st.write(f"Estimasi risiko per trade dengan leverage {leverage}x adalah **{risk_percent:.2f}%** dari margin.")
-            if risk_percent > 5:
-                st.warning("⚠️ PERINGATAN: Risiko terlalu tinggi (>5%). Kurangi leverage atau lewati trade ini.")
+
+            # PERBAIKAN: Cek dulu apakah ada entry price
+            if entry > 0:
+                risk_percent = abs((entry - sl) / entry) * 100 * leverage
+                
+                st.write(f"Estimasi risiko per trade dengan leverage {leverage}x adalah **{risk_percent:.2f}%** dari margin.")
+                
+                if risk_percent > 5:
+                    st.warning("⚠️ PERINGATAN: Risiko terlalu tinggi (>5%). Kurangi leverage atau lewati trade ini.")
+                else:
+                    st.info("✅ Risiko dalam batas aman.")
             else:
-                st.info("✅ Risiko dalam batas aman.")
+                # Jika Neutral / Tidak ada posisi
+                st.info("😴 **Cash is King.** Tidak ada posisi terbuka, jadi risiko Anda saat ini adalah 0%. Menunggu setup A+...")
