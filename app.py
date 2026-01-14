@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import time
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Sniper Real Volume Shock")
+st.set_page_config(layout="wide", page_title="Sniper AI - Full Dashboard")
 
 # --- SESSION STATE ---
 if 'scan_results' not in st.session_state:
@@ -15,8 +15,8 @@ if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = None
 
 # --- JUDUL ---
-st.title("🦅 Sniper AI (Volume Shock Detector)")
-st.caption("Logic: Technical Rules + Real Money Flow (Volume Anomaly > 200%)")
+st.title("🦅 Sniper AI (Full Dashboard)")
+st.caption("Logic: Technical Rules + Volume Shock + Complete Risk Levels")
 
 # --- SIDEBAR ---
 st.sidebar.header("🕹️ Kontrol Utama")
@@ -26,6 +26,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Parameter")
 
 timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=1)
+# Logika Leverage
 if timeframe == "5m": rec_leverage = "10x - 20x"; max_rec = 20
 elif timeframe == "15m": rec_leverage = "5x - 10x"; max_rec = 10
 else: rec_leverage = "2x - 5x"; max_rec = 5
@@ -58,21 +59,18 @@ def get_data(symbol, tf, limit=200):
         return df
     except: return None
 
-# --- ANALISA UTAMA (DENGAN VOLUME SHOCK) ---
+# --- ANALISA UTAMA ---
 def analyze_symbol(df, risk_reward_ratio):
     if df is None: return "NEUTRAL", 0, 0, 0, False, 0.0
     
-    # 1. Indikator Teknikal Standar
+    # 1. Indikator Teknikal
     df['EMA_200'] = ta.ema(df['close'], length=200)
     df['RSI'] = ta.rsi(df['close'], length=14)
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     
-    # 2. DETEKSI VOLUME SHOCK (PENGGANTI TWITTER)
-    # Hitung rata-rata volume 20 candle terakhir
+    # 2. Volume Shock
     avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
     curr_vol = df.iloc[-1]['volume']
-    
-    # Logic Hype: Jika Volume sekarang > 2x lipat (200%) dari rata-rata
     volume_spike_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 0
     is_hyped = volume_spike_ratio > 2.0 
     
@@ -92,10 +90,8 @@ def analyze_symbol(df, risk_reward_ratio):
     # Labeling
     final_signal_label = signal
     if signal != "NEUTRAL":
-        if is_hyped:
-            final_signal_label = f"{signal} 🔥 (VOL {volume_spike_ratio:.1f}x)"
-        else:
-            final_signal_label = f"{signal}"
+        if is_hyped: final_signal_label = f"{signal} 🔥"
+        else: final_signal_label = f"{signal}"
             
     return final_signal_label, entry, sl, tp, is_hyped, volume_spike_ratio
 
@@ -107,21 +103,23 @@ if scan_button:
     progress_bar = st.progress(0)
     temp_results = []
     
-    with st.spinner(f"Memindai Struktur Harga & Aliran Uang ({timeframe})..."):
+    with st.spinner(f"Memindai Data Lengkap (Entry/CL/TP) - {timeframe}..."):
         for i, sym in enumerate(available_symbols):
             progress_bar.progress((i + 1) / len(available_symbols))
             
             df_scan = get_data(sym, timeframe)
             if df_scan is not None:
-                # Panggil Analisa Baru
                 sig_label, ent, stop, take, hype_status, vol_ratio = analyze_symbol(df_scan, risk_reward)
                 
                 if "NEUTRAL" not in sig_label:
                     risk_alert = abs((ent - stop)/ent) * 100 * leverage
+                    # Simpan SEMUA data (Termasuk SL dan TP)
                     temp_results.append({
                         'symbol': sym, 
                         'signal': sig_label, 
                         'entry': ent, 
+                        'sl': stop,    # <--- DATA CL (Cut Loss)
+                        'tp': take,    # <--- DATA TP (Take Profit)
                         'risk': risk_alert, 
                         'vol_ratio': vol_ratio,
                         'is_hype': hype_status
@@ -132,7 +130,7 @@ if scan_button:
     st.session_state.last_scan_time = time.strftime("%H:%M:%S")
     progress_bar.empty()
 
-# --- TAMPILAN HASIL ---
+# --- TAMPILAN HASIL (TABEL 7 KOLOM) ---
 st.subheader(f"📡 Hasil Radar ({timeframe})")
 
 if st.session_state.last_scan_time:
@@ -141,33 +139,48 @@ if st.session_state.last_scan_time:
 if len(st.session_state.scan_results) > 0:
     st.success(f"DITEMUKAN {len(st.session_state.scan_results)} KANDIDAT:")
     
-    # Header
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-    c1.markdown("**Koin**")
-    c2.markdown("**Sinyal & Power**")
-    c3.markdown("**Volume Power**")
-    c4.markdown("**Risiko**")
+    # Header Tabel (7 Kolom Lengkap)
+    # Koin | Sinyal | Entry | CL | TP | Volume | Risk
+    cols = st.columns([1.2, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
+    cols[0].markdown("**Koin**")
+    cols[1].markdown("**Sinyal**")
+    cols[2].markdown("**Entry**")
+    cols[3].markdown("**CL (Stop)**")  # <--- MUNCUL
+    cols[4].markdown("**TP (Target)**") # <--- MUNCUL
+    cols[5].markdown("**Volume**")
+    cols[6].markdown("**Risk**")
     st.markdown("---")
 
     for item in st.session_state.scan_results:
-        d1, d2, d3, d4 = st.columns([2, 2, 2, 2])
+        cols = st.columns([1.2, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
         
-        with d1: 
-            if "LONG" in item['signal']: d1.markdown(f"🟢 **{item['symbol']}**")
-            else: d1.markdown(f"🔴 **{item['symbol']}**")
+        # 1. Koin
+        with cols[0]: 
+            if "LONG" in item['signal']: cols[0].markdown(f"🟢 **{item['symbol']}**")
+            else: cols[0].markdown(f"🔴 **{item['symbol']}**")
             
-        with d2:
-            if item['is_hype']: d2.markdown(f"**{item['signal']}**") # Bold
-            else: d2.write(f"{item['signal']}")
+        # 2. Sinyal
+        with cols[1]:
+            if item['is_hype']: cols[1].markdown(f"**{item['signal']}**") 
+            else: cols[1].write(f"{item['signal']}")
         
-        with d3:
-            # Tampilkan seberapa kuat ledakan volumenya
-            if item['is_hype']:
-                d3.metric("Spike", f"{item['vol_ratio']:.1f}x Avg", delta="High Interest")
-            else:
-                d3.write(f"Normal ({item['vol_ratio']:.1f}x)")
+        # 3. Entry
+        with cols[2]: cols[2].write(f"${item['entry']}")
+
+        # 4. CL (Stop Loss)
+        with cols[3]: cols[3].write(f"${item['sl']:.4f}")
+
+        # 5. TP (Take Profit)
+        with cols[4]: cols[4].write(f"${item['tp']:.4f}")
+
+        # 6. Volume
+        with cols[5]:
+            if item['is_hype']: cols[5].metric("Vol", f"{item['vol_ratio']:.1f}x", delta="HYPE", label_visibility="collapsed")
+            else: cols[5].write(f"{item['vol_ratio']:.1f}x (Normal)")
         
-        with d4: d4.write(f"{item['risk']:.2f}%")
+        # 7. Risiko
+        with cols[6]: 
+            cols[6].write(f"{item['risk']:.2f}%")
         
 else:
     if st.session_state.last_scan_time: st.info("Market sepi.")
@@ -189,27 +202,23 @@ if df_main is not None:
     
     # Chart
     df_main['EMA_200'] = ta.ema(df_main['close'], length=200)
-    
-    # Visualisasi Volume Spike di Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df_main['time'], open=df_main['open'], high=df_main['high'], low=df_main['low'], close=df_main['close'], name='Price'))
     fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['EMA_200'], mode='lines', line=dict(color='orange'), name='EMA 200'))
-    
     fig.update_layout(height=500, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
     
     # Kartu Info
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Sinyal", main_sig)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Sinyal", main_sig)
+    if main_hype: c2.metric("Volume", f"{main_vol_ratio:.1f}x", delta="HYPE")
+    else: c2.metric("Volume", f"{main_vol_ratio:.1f}x", delta="Normal", delta_color="off")
     
-    # Metrik Volume Real
-    if main_hype:
-        col2.metric("Volume Power", f"{main_vol_ratio:.1f}x", delta="HYPE DETECTED")
-    else:
-        col2.metric("Volume Power", f"{main_vol_ratio:.1f}x", delta="Normal", delta_color="off")
-        
-    col3.metric("Entry", f"${main_ent}")
-    col4.metric("Take Profit", f"${main_tp}")
+    c3.metric("Entry", f"${main_ent}")
+    c4.metric("TP (Target)", f"${main_tp}")
+    
+    # Risk Bar
+    st.metric("CL (Stop Loss)", f"${main_sl}", delta_color="inverse")
     
     if main_ent > 0:
         risk_percent = abs((main_ent - main_sl) / main_ent) * 100 * leverage
