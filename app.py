@@ -15,8 +15,8 @@ if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = None
 
 # --- JUDUL ---
-st.title("🦅 Sniper AI (Full Dashboard)")
-st.caption("Logic: Technical Rules + Volume Shock + Complete Risk Levels")
+st.title("🦅 Sniper AI (Stable Version)")
+st.caption("Logic: Technical Rules + Volume Shock + Anti-Crash Protection")
 
 # --- SIDEBAR ---
 st.sidebar.header("🕹️ Kontrol Utama")
@@ -50,10 +50,14 @@ def get_top_volume_symbols():
         return [x['symbol'] for x in usdt_pairs[:50]]
     except: return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-def get_data(symbol, tf, limit=200):
+# FIX 1: Limit dinaikkan ke 1000 (sebelumnya 200) agar EMA 200 valid
+def get_data(symbol, tf, limit=1000):
     try:
         exchange = ccxt.bitget()
         bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+        # Cek jika data kosong atau terlalu sedikit
+        if not bars or len(bars) < 210: 
+            return None
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
         return df
@@ -61,13 +65,19 @@ def get_data(symbol, tf, limit=200):
 
 # --- ANALISA UTAMA ---
 def analyze_symbol(df, risk_reward_ratio):
-    if df is None: return "NEUTRAL", 0, 0, 0, False, 0.0
+    # Default return value jika data error
+    default_ret = ("NEUTRAL", 0, 0, 0, False, 0.0)
+    
+    if df is None or df.empty: return default_ret
     
     # 1. Indikator Teknikal
-    df['EMA_200'] = ta.ema(df['close'], length=200)
-    df['RSI'] = ta.rsi(df['close'], length=14)
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    
+    try:
+        df['EMA_200'] = ta.ema(df['close'], length=200)
+        df['RSI'] = ta.rsi(df['close'], length=14)
+        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    except:
+        return default_ret
+
     # 2. Volume Shock
     avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
     curr_vol = df.iloc[-1]['volume']
@@ -75,9 +85,15 @@ def analyze_symbol(df, risk_reward_ratio):
     is_hyped = volume_spike_ratio > 2.0 
     
     curr = df.iloc[-1]; prev = df.iloc[-2]
+    
+    # FIX 2: Safety Check - Pastikan EMA 200 bukan NaN (Not a Number)
+    # Ini yang mencegah TypeError
+    if pd.isna(curr['EMA_200']) or pd.isna(curr['RSI']):
+        return default_ret
+
     signal = "NEUTRAL"; entry = 0.0; sl = 0.0; tp = 0.0
     
-    # Logic Sniper
+    # Logic Sniper (Safe Comparison)
     if curr['close'] > curr['EMA_200']:
         if prev['RSI'] < 45 and curr['RSI'] > 45: 
             signal = "LONG"; entry = curr['close']
@@ -103,32 +119,35 @@ if scan_button:
     progress_bar = st.progress(0)
     temp_results = []
     
-    with st.spinner(f"Memindai Data Lengkap (Entry/CL/TP) - {timeframe}..."):
-        for i, sym in enumerate(available_symbols):
-            progress_bar.progress((i + 1) / len(available_symbols))
+    # Text indicator
+    status_text = st.empty()
+    status_text.text(f"Memindai Data Lengkap (Limit 1000 Candles) - {timeframe}...")
+    
+    for i, sym in enumerate(available_symbols):
+        progress_bar.progress((i + 1) / len(available_symbols))
+        
+        df_scan = get_data(sym, timeframe)
+        if df_scan is not None:
+            sig_label, ent, stop, take, hype_status, vol_ratio = analyze_symbol(df_scan, risk_reward)
             
-            df_scan = get_data(sym, timeframe)
-            if df_scan is not None:
-                sig_label, ent, stop, take, hype_status, vol_ratio = analyze_symbol(df_scan, risk_reward)
-                
-                if "NEUTRAL" not in sig_label:
-                    risk_alert = abs((ent - stop)/ent) * 100 * leverage
-                    # Simpan SEMUA data (Termasuk SL dan TP)
-                    temp_results.append({
-                        'symbol': sym, 
-                        'signal': sig_label, 
-                        'entry': ent, 
-                        'sl': stop,    # <--- DATA CL (Cut Loss)
-                        'tp': take,    # <--- DATA TP (Take Profit)
-                        'risk': risk_alert, 
-                        'vol_ratio': vol_ratio,
-                        'is_hype': hype_status
-                    })
-            time.sleep(0.05)
+            if "NEUTRAL" not in sig_label:
+                risk_alert = abs((ent - stop)/ent) * 100 * leverage
+                temp_results.append({
+                    'symbol': sym, 
+                    'signal': sig_label, 
+                    'entry': ent, 
+                    'sl': stop,
+                    'tp': take,
+                    'risk': risk_alert, 
+                    'vol_ratio': vol_ratio,
+                    'is_hype': hype_status
+                })
+        time.sleep(0.05)
             
     st.session_state.scan_results = temp_results
     st.session_state.last_scan_time = time.strftime("%H:%M:%S")
     progress_bar.empty()
+    status_text.empty()
 
 # --- TAMPILAN HASIL (TABEL 7 KOLOM) ---
 st.subheader(f"📡 Hasil Radar ({timeframe})")
@@ -139,14 +158,13 @@ if st.session_state.last_scan_time:
 if len(st.session_state.scan_results) > 0:
     st.success(f"DITEMUKAN {len(st.session_state.scan_results)} KANDIDAT:")
     
-    # Header Tabel (7 Kolom Lengkap)
-    # Koin | Sinyal | Entry | CL | TP | Volume | Risk
+    # Header Tabel
     cols = st.columns([1.2, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
     cols[0].markdown("**Koin**")
     cols[1].markdown("**Sinyal**")
     cols[2].markdown("**Entry**")
-    cols[3].markdown("**CL (Stop)**")  # <--- MUNCUL
-    cols[4].markdown("**TP (Target)**") # <--- MUNCUL
+    cols[3].markdown("**CL (Stop)**")
+    cols[4].markdown("**TP (Target)**")
     cols[5].markdown("**Volume**")
     cols[6].markdown("**Risk**")
     st.markdown("---")
@@ -154,33 +172,19 @@ if len(st.session_state.scan_results) > 0:
     for item in st.session_state.scan_results:
         cols = st.columns([1.2, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
         
-        # 1. Koin
         with cols[0]: 
             if "LONG" in item['signal']: cols[0].markdown(f"🟢 **{item['symbol']}**")
             else: cols[0].markdown(f"🔴 **{item['symbol']}**")
-            
-        # 2. Sinyal
         with cols[1]:
             if item['is_hype']: cols[1].markdown(f"**{item['signal']}**") 
             else: cols[1].write(f"{item['signal']}")
-        
-        # 3. Entry
         with cols[2]: cols[2].write(f"${item['entry']}")
-
-        # 4. CL (Stop Loss)
         with cols[3]: cols[3].write(f"${item['sl']:.4f}")
-
-        # 5. TP (Take Profit)
         with cols[4]: cols[4].write(f"${item['tp']:.4f}")
-
-        # 6. Volume
         with cols[5]:
             if item['is_hype']: cols[5].metric("Vol", f"{item['vol_ratio']:.1f}x", delta="HYPE", label_visibility="collapsed")
-            else: cols[5].write(f"{item['vol_ratio']:.1f}x (Normal)")
-        
-        # 7. Risiko
-        with cols[6]: 
-            cols[6].write(f"{item['risk']:.2f}%")
+            else: cols[5].write(f"{item['vol_ratio']:.1f}x")
+        with cols[6]: cols[6].write(f"{item['risk']:.2f}%")
         
 else:
     if st.session_state.last_scan_time: st.info("Market sepi.")
@@ -201,12 +205,15 @@ if df_main is not None:
     st.write(f"### Analisa: {selected_symbol} ({timeframe})")
     
     # Chart
-    df_main['EMA_200'] = ta.ema(df_main['close'], length=200)
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=df_main['time'], open=df_main['open'], high=df_main['high'], low=df_main['low'], close=df_main['close'], name='Price'))
-    fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['EMA_200'], mode='lines', line=dict(color='orange'), name='EMA 200'))
-    fig.update_layout(height=500, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    # Handle error jika EMA belum terbentuk di chart
+    if 'EMA_200' in df_main.columns and not df_main['EMA_200'].isna().all():
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(x=df_main['time'], open=df_main['open'], high=df_main['high'], low=df_main['low'], close=df_main['close'], name='Price'))
+        fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['EMA_200'], mode='lines', line=dict(color='orange'), name='EMA 200'))
+        fig.update_layout(height=500, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("⚠️ Data historis tidak cukup untuk menampilkan EMA 200. Koin ini mungkin baru listing.")
     
     # Kartu Info
     c1, c2, c3, c4 = st.columns(4)
@@ -217,7 +224,6 @@ if df_main is not None:
     c3.metric("Entry", f"${main_ent}")
     c4.metric("TP (Target)", f"${main_tp}")
     
-    # Risk Bar
     st.metric("CL (Stop Loss)", f"${main_sl}", delta_color="inverse")
     
     if main_ent > 0:
