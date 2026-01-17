@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import time
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Sniper Reversal (BB Strategy)")
+st.set_page_config(layout="wide", page_title="Sniper Reversal (Fixed)")
 
 # --- SESSION STATE ---
 if 'scan_results' not in st.session_state:
@@ -60,65 +60,64 @@ def get_data(symbol, tf, limit=500):
         return df
     except: return None
 
-# --- OTAK BARU: BOLLINGER REVERSAL STRATEGY ---
+# --- OTAK BARU: BOLLINGER REVERSAL STRATEGY (FIXED) ---
 def analyze_symbol(df, risk_reward_ratio):
     default_ret = ("NEUTRAL", 0, 0, 0, False, 0.0)
     if df is None or df.empty: return default_ret
     
     try:
-        # 1. Hitung Bollinger Bands (Length 20, Std 2)
+        # 1. Hitung Bollinger Bands
         bb = ta.bbands(df['close'], length=20, std=2)
-        # Nama kolom hasil bb: BBL_20_2.0 (Lower), BBM_20_2.0 (Mid), BBU_20_2.0 (Upper)
+        
+        # FIX: Cari nama kolom secara dinamis (Anti KeyError)
+        # Kita cari kolom yang diawali 'BBL' (Lower), 'BBU' (Upper), 'BBM' (Mid)
+        col_lower = [c for c in bb.columns if c.startswith('BBL')][0]
+        col_upper = [c for c in bb.columns if c.startswith('BBU')][0]
+        col_mid   = [c for c in bb.columns if c.startswith('BBM')][0]
+        
+        # Gabungkan ke DataFrame utama
         df = pd.concat([df, bb], axis=1)
         
-        # 2. Hitung RSI
+        # 2. Hitung RSI & ATR
         df['RSI'] = ta.rsi(df['close'], length=14)
-        
-        # 3. Hitung ATR untuk Stop Loss
         df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     except: return default_ret
 
     curr = df.iloc[-1]
     
-    # Ambil nama kolom dinamis (kadang pandas_ta beda versi beda nama)
-    # Biasanya: BBL_20_2.0, BBU_20_2.0
-    lower_band = curr[f"BBL_20_2.0"]
-    upper_band = curr[f"BBU_20_2.0"]
-    mid_band = curr[f"BBM_20_2.0"]
+    # Ambil nilai berdasarkan nama kolom dinamis tadi
+    lower_band = curr[col_lower]
+    upper_band = curr[col_upper]
+    mid_band   = curr[col_mid]
     
     # Cek Safety Data
     if pd.isna(lower_band) or pd.isna(curr['RSI']): return default_ret
 
     signal = "NEUTRAL"; entry = 0.0; sl = 0.0; tp = 0.0
     
-    # --- LOGIKA REVERSAL (Pemantulan) ---
+    # --- LOGIKA REVERSAL ---
     
     # LONG: Harga Tembus Bawah + RSI Oversold (<30)
-    # Artinya: Sudah terlalu murah, potensi mantul ke tengah
     if curr['close'] <= lower_band and curr['RSI'] < 30:
         signal = "LONG"
         entry = curr['close']
-        # Stop Loss: Sedikit di bawah Low candle ini (Kasih ruang napas dikit)
         sl = entry - (curr['ATR'] * 1.0) 
-        # Target: Minimal balik ke Garis Tengah (Mean Reversion)
         tp = mid_band 
-        
-        # Opsi TP 2: Pakai Risk Reward Rasio standar jika Mid Band terlalu dekat
+        # Opsi TP Risk Reward
         tp_ratio = entry + ((entry - sl) * risk_reward_ratio)
-        if tp_ratio > tp: tp = tp_ratio # Ambil target yang lebih tinggi
+        if tp_ratio > tp: tp = tp_ratio
 
     # SHORT: Harga Tembus Atas + RSI Overbought (>70)
-    # Artinya: Sudah terlalu mahal, potensi jatuh ke tengah
     elif curr['close'] >= upper_band and curr['RSI'] > 70:
         signal = "SHORT"
         entry = curr['close']
         sl = entry + (curr['ATR'] * 1.0)
         tp = mid_band
-        
+        # Opsi TP Risk Reward
         tp_ratio = entry - ((sl - entry) * risk_reward_ratio)
-        if tp_ratio < tp: tp = tp_ratio # Ambil target yang lebih jauh (bawah)
+        if tp_ratio < tp: tp = tp_ratio
 
-    # Labeling Hype (Volume Shock tetep kita pake buat validasi tenaga)
+    # Volume Hype
     avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
     volume_spike_ratio = (curr['volume'] / avg_vol) if avg_vol > 0 else 0
     is_hyped = volume_spike_ratio > 2.0
@@ -212,21 +211,30 @@ if df_main is not None:
     st.write(f"### Analisa Reversal: {display_name_main} ({timeframe})")
     
     # CHART BOLLINGER
-    if 'BBU_20_2.0' in df_main.columns:
+    # Cari nama kolom lagi untuk plotting
+    try:
+        bb = ta.bbands(df_main['close'], length=20, std=2)
+        col_lower = [c for c in bb.columns if c.startswith('BBL')][0]
+        col_upper = [c for c in bb.columns if c.startswith('BBU')][0]
+        col_mid   = [c for c in bb.columns if c.startswith('BBM')][0]
+        
+        # Gabung sementara untuk plotting
+        df_plot = pd.concat([df_main, bb], axis=1)
+        
         fig = go.Figure()
-        # Candlestick
-        fig.add_trace(go.Candlestick(x=df_main['time'], open=df_main['open'], high=df_main['high'], low=df_main['low'], close=df_main['close'], name='Price'))
-        # Bollinger Bands
-        fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['BBU_20_2.0'], mode='lines', line=dict(color='gray', width=1), name='Upper Band'))
-        fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['BBL_20_2.0'], mode='lines', line=dict(color='gray', width=1), name='Lower Band', fill='tonexty', fillcolor='rgba(200,200,200,0.1)'))
-        fig.add_trace(go.Scatter(x=df_main['time'], y=df_main['BBM_20_2.0'], mode='lines', line=dict(color='orange', width=1.5), name='Mid Band'))
+        fig.add_trace(go.Candlestick(x=df_plot['time'], open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name='Price'))
+        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_upper], mode='lines', line=dict(color='gray', width=1), name='Upper Band'))
+        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_lower], mode='lines', line=dict(color='gray', width=1), name='Lower Band', fill='tonexty', fillcolor='rgba(200,200,200,0.1)'))
+        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_mid], mode='lines', line=dict(color='orange', width=1.5), name='Mid Band'))
         
         fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"Bollinger Bands (20, 2)")
         st.plotly_chart(fig, use_container_width=True)
         
-        # RSI Display
-        curr_rsi = df_main.iloc[-1]['RSI']
+        curr_rsi = df_plot.iloc[-1]['RSI'] if 'RSI' in df_plot.columns else ta.rsi(df_plot['close'], length=14).iloc[-1]
         st.metric("RSI Momentum", f"{curr_rsi:.2f}", delta="Extremes: <30 or >70")
+        
+    except:
+        st.warning("Data chart tidak cukup untuk menampilkan Bollinger Bands.")
     
     # INFO PANEL
     c1, c2, c3, c4 = st.columns(4)
