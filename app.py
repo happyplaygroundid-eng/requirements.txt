@@ -8,19 +8,16 @@ from datetime import datetime
 # ==========================================
 # 1. KONFIGURASI HALAMAN & STATE
 # ==========================================
-st.set_page_config(layout="wide", page_title="Radar Pro 50", page_icon="radar")
-
-if 'top_coins' not in st.session_state:
-    st.session_state.top_coins = []
-if 'last_scan_time' not in st.session_state:
-    st.session_state.last_scan_time = None
-
 st.markdown("""
 <style>
     .big-font { font-size:20px !important; font-weight: bold; }
     .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
-    .success-box { padding:10px; border-radius:5px; background-color: rgba(0, 255, 0, 0.1); border: 1px solid green; }
-    .error-box { padding:10px; border-radius:5px; background-color: rgba(255, 0, 0, 0.1); border: 1px solid red; }
+    /* Kotak Hijau (Aman) */
+    .success-box { padding:15px; border-radius:10px; background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+    /* Kotak Merah (Short) */
+    .error-box { padding:15px; border-radius:10px; background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    /* Kotak Kuning (Sniper/Warning) */
+    .warning-box { padding:15px; border-radius:10px; background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -67,74 +64,113 @@ def fetch_candle_data(symbol, timeframe):
 # ==========================================
 
 def analyze_smart_money(df, risk_reward_ratio):
-    # Indikator
+    # --- INDIKATOR ---
     df['ema200'] = df.ta.ema(length=200)
-    df['ema50'] = df.ta.ema(length=50)
     df['rsi'] = df.ta.rsi(length=14)
     df['atr'] = df.ta.atr(length=14)
     df['adx'] = df.ta.adx(length=14)['ADX_14']
     df['vol_ma'] = df['volume'].rolling(window=20).mean()
 
-    # Market Structure
+    # --- MARKET STRUCTURE ---
     window = 3
     df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
     df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
     df['is_high'] = (df['high'] == df['swing_high'])
     df['is_low'] = (df['low'] == df['swing_low'])
 
-    prev = df.iloc[-2]
-    curr_price = df.iloc[-1]['close']
+    prev = df.iloc[-2] # Candle Closed
+    curr_price = df.iloc[-1]['close'] # Running Price
+    curr_rsi = df.iloc[-1]['rsi']
 
     valid_highs = df[df['is_high'] == True]
     valid_lows = df[df['is_low'] == True]
     
     if valid_highs.empty or valid_lows.empty: return None
 
-    last_swing_high = valid_highs.iloc[-2]['high']
-    last_swing_low = valid_lows.iloc[-2]['low']
+    last_swing_high = valid_highs.iloc[-2]['high'] # Resistance (Calon Support)
+    last_swing_low = valid_lows.iloc[-2]['low']    # Support (Calon Resistance)
 
-    # Patterns
-    is_bull_engulf = (prev['close'] > prev['open']) and \
-                     (df.iloc[-3]['close'] < df.iloc[-3]['open']) and \
-                     (prev['close'] > df.iloc[-3]['open']) and \
-                     (prev['open'] < df.iloc[-3]['close'])
-
-    is_bear_engulf = (prev['close'] < prev['open']) and \
-                     (df.iloc[-3]['close'] > df.iloc[-3]['open']) and \
-                     (prev['close'] < df.iloc[-3]['open']) and \
-                     (prev['open'] > df.iloc[-3]['close'])
-
-    # Logic
+    # --- LOGIC ---
     if pd.isna(prev['adx']) or prev['adx'] < 20:
         return {"status": "SIDEWAYS", "msg": f"Pasar Lemah (ADX: {prev['adx']:.1f}), Wait."}
 
     is_vol_valid = prev['volume'] > prev['vol_ma']
     signal_data = None
 
-    # LONG
+    # ==============================
+    # 🟢 SKENARIO LONG
+    # ==============================
     if prev['close'] > prev['ema200'] and prev['close'] > last_swing_high:
-        if is_vol_valid or is_bull_engulf:
-            entry = curr_price
-            sl = entry - (prev['atr'] * 1.5)
-            tp = entry + ((entry - sl) * risk_reward_ratio)
+        if is_vol_valid:
+            # ---> SNIPER LOGIC CHECK <---
+            if curr_rsi > 70:
+                # KASUS: Breakout tapi RSI Kepanasan (Overbought)
+                # Strategi: Tunggu Retest
+                entry_price = last_swing_high # Pasang jaring di atap yg baru jebol
+                sl_price = entry_price - (prev['atr'] * 1.5)
+                tp_price = entry_price + ((entry_price - sl_price) * risk_reward_ratio)
+                
+                advice = (f"⚠️ **OPSI SNIPER (LEBIH AMAN):**\n"
+                          f"Harga sekarang ${curr_price:.4f} terlalu tinggi (RSI {curr_rsi:.1f}). "
+                          f"Biasanya harga akan minta turun dulu.\n\n"
+                          f"👉 **Jangan Kejar!** Pasang **Buy Limit** di area Retest **${entry_price:.4f}**.\n"
+                          f"Risk jadi kecil, Reward jadi lebar.")
+                status_label = "LONG (WAIT RETEST)"
+                color_class = "warning-box" # Kuning
+            else:
+                # KASUS: Breakout Sehat (RSI Masih Aman)
+                entry_price = curr_price
+                sl_price = entry_price - (prev['atr'] * 1.5)
+                tp_price = entry_price + ((entry_price - sl_price) * risk_reward_ratio)
+                
+                advice = "✅ **MOMENTUM VALID:** RSI masih aman. Boleh Entry Market sekarang."
+                status_label = "LONG (AGGRESSIVE)"
+                color_class = "success-box" # Hijau
+
             signal_data = {
-                "status": "LONG 🟢", "entry": entry, "sl": sl, "tp": tp,
-                "reason": "Uptrend + Breakout + Vol/Engulf"
+                "status": status_label, "color": color_class,
+                "entry": entry_price, "sl": sl_price, "tp": tp_price,
+                "reason": "Uptrend + BoS + Volume",
+                "advice": advice
             }
 
-    # SHORT
+    # ==============================
+    # 🔴 SKENARIO SHORT
+    # ==============================
     elif prev['close'] < prev['ema200'] and prev['close'] < last_swing_low:
-        if is_vol_valid or is_bear_engulf:
-            entry = curr_price
-            sl = entry + (prev['atr'] * 1.5)
-            tp = entry - ((sl - entry) * risk_reward_ratio)
+        if is_vol_valid:
+             # ---> SNIPER LOGIC CHECK <---
+            if curr_rsi < 30:
+                # KASUS: Breakdown tapi RSI Kedinginan (Oversold)
+                entry_price = last_swing_low # Pasang jaring di lantai yg baru jebol
+                sl_price = entry_price + (prev['atr'] * 1.5)
+                tp_price = entry_price - ((sl_price - entry_price) * risk_reward_ratio)
+                
+                advice = (f"⚠️ **OPSI SNIPER (LEBIH AMAN):**\n"
+                          f"Harga sekarang ${curr_price:.4f} terlalu rendah (RSI {curr_rsi:.1f}). "
+                          f"Potensi membal naik dulu (Koreksi).\n\n"
+                          f"👉 **Jangan FOMO!** Pasang **Sell Limit** di area Retest **${entry_price:.4f}**.")
+                status_label = "SHORT (WAIT RETEST)"
+                color_class = "warning-box"
+            else:
+                # KASUS: Breakdown Sehat
+                entry_price = curr_price
+                sl_price = entry_price + (prev['atr'] * 1.5)
+                tp_price = entry_price - ((sl_price - entry_price) * risk_reward_ratio)
+                
+                advice = "✅ **MOMENTUM VALID:** RSI masih aman. Boleh Short Market sekarang."
+                status_label = "SHORT (AGGRESSIVE)"
+                color_class = "error-box" # Merah
+
             signal_data = {
-                "status": "SHORT 🔴", "entry": entry, "sl": sl, "tp": tp,
-                "reason": "Downtrend + Breakdown + Vol/Engulf"
+                "status": status_label, "color": color_class,
+                "entry": entry_price, "sl": sl_price, "tp": tp_price,
+                "reason": "Downtrend + Breakdown + Volume",
+                "advice": advice
             }
             
     if not signal_data:
-        return {"status": "NEUTRAL", "msg": "Menunggu Setup BoS Valid..."}
+        return {"status": "NEUTRAL", "msg": "Menunggu Setup BoS Valid...", "color": "neutral"}
         
     return signal_data
 
@@ -175,32 +211,37 @@ else:
                 
                 # Cek data minimal untuk EMA200
                 if df is not None and len(df) > 200:
-                    result = analyze_smart_money(df, rr_ratio)
-                    status = result['status']
-                    
-                    if "LONG" in status:
-                        st.markdown(f'<div class="success-box"><h3>{status}</h3></div>', unsafe_allow_html=True)
-                        st.write(f"**Reason:** {result['reason']}")
-                        st.metric("Entry", f"${result['entry']:,.4f}")
-                        st.metric("Stop Loss", f"${result['sl']:,.4f}", delta="-Risk")
-                        st.metric("Take Profit", f"${result['tp']:,.4f}", delta="+Reward")
-                        
-                    elif "SHORT" in status:
-                        st.markdown(f'<div class="error-box"><h3>{status}</h3></div>', unsafe_allow_html=True)
-                        st.write(f"**Reason:** {result['reason']}")
-                        st.metric("Entry", f"${result['entry']:,.4f}")
-                        st.metric("Stop Loss", f"${result['sl']:,.4f}", delta="-Risk")
-                        st.metric("Take Profit", f"${result['tp']:,.4f}", delta="+Reward")
-                    
-                    else:
-                        st.warning(f"**{status}**")
-                        st.write(result['msg'])
-                        # Tampilkan nilai indikator jika ada
-                        if 'rsi' in df.columns:
-                            st.write(f"RSI: {df.iloc[-1]['rsi']:.2f}")
-                else:
-                    st.error("Data history kurang dari 200 candle. Coba timeframe lebih kecil.")
+    result = analyze_smart_money(df, rr_ratio)
+    status = result['status']
+    
+    # Jika Sinyal Valid (LONG atau SHORT)
+    if "LONG" in status or "SHORT" in status:
+        # Tampilkan Kotak Berwarna sesuai Logic Sniper
+        st.markdown(f'<div class="{result["color"]}"><h2>{status}</h2></div>', unsafe_allow_html=True)
+        
+        st.write("---")
+        # Menampilkan Saran Sniper
+        st.info(result['advice']) 
+        
+        st.write("---")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🎯 ENTRY (Limit)", f"${result['entry']:,.4f}")
+        c2.metric("🛡️ STOP LOSS", f"${result['sl']:,.4f}")
+        c3.metric("💰 TAKE PROFIT", f"${result['tp']:,.4f}")
+        
+        # Kalkulasi Risk Reward Real
+        risk_per_coin = abs(result['entry'] - result['sl'])
+        reward_per_coin = abs(result['tp'] - result['entry'])
+        rr_display = reward_per_coin / risk_per_coin if risk_per_coin > 0 else 0
+        st.caption(f"Risk:Reward Ratio Terhitung: 1 : {rr_display:.2f}")
 
+    else:
+        st.warning(f"**{status}**")
+        st.write(result['msg'])
+        if 'rsi' in df.columns:
+            curr_rsi = df.iloc[-1]['rsi']
+            curr_adx = df.iloc[-1]['adx']
+            st.write(f"📊 Status Indikator: RSI {curr_rsi:.1f} | ADX {curr_adx:.1f}")
         with col_chart:
             if df is not None:
                 st.subheader("Chart Data")
