@@ -1,251 +1,232 @@
-import streamlit as st
 import ccxt
 import pandas as pd
 import pandas_ta as ta
-import plotly.graph_objects as go
 import time
+import logging
+from datetime import datetime
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Sniper Reversal (Fixed)")
+# ==========================================
+# KONFIGURASI PENGGUNA (ISI BAGIAN INI)
+# ==========================================
+API_KEY = 'MASUKKAN_BITGET_API_KEY_KAMU'
+SECRET_KEY = 'MASUKKAN_BITGET_SECRET_KEY_KAMU'
+PASSPHRASE = 'MASUKKAN_BITGET_PASSPHRASE_KAMU'
 
-# --- SESSION STATE ---
-if 'scan_results' not in st.session_state:
-    st.session_state.scan_results = []
-if 'last_scan_time' not in st.session_state:
-    st.session_state.last_scan_time = None
+SYMBOL = 'BTC/USDT:USDT'   # Pair Futures
+TIMEFRAME = '15m'          # Timeframe Sniper
+LEVERAGE = 20              # Leverage
+RISK_PCT = 0.02            # Resiko per trade (2% dari modal)
+RR_RATIO = 2.5             # Target Profit (2.5x dari resiko)
+AMOUNT_USDT = 100          # Margin (Modal) per trade dalam USDT
 
-# --- JUDUL ---
-st.title("🦅 Sniper Reversal (Mean Reversion)")
-st.caption("Strategy: Bollinger Bands + RSI Extremes | Target: Catching Tops & Bottoms")
+# ==========================================
+# SETUP LOGGING & EXCHANGE
+# ==========================================
+logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
-# --- SIDEBAR ---
-st.sidebar.header("🕹️ Kontrol Utama")
-scan_button = st.sidebar.button("🔍 SCAN REVERSAL SETUP", type="primary")
+try:
+    exchange = ccxt.bitget({
+        'apiKey': bg_f4bba348f9f7d6cc02eb33ce14dc273f
+        'secret': 2b81585bd6631eb09a8f47a01bfcb9b599a90f05b847eab57e0920c0c4166db8,
+        'password': Drumcaholico23,
+        'options': {'defaultType': 'swap'}
+    })
+    logging.info("Berhasil terhubung ke Bitget Futures!")
+except Exception as e:
+    logging.error(f"Gagal konek exchange: {e}")
+    exit()
 
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Parameter")
+# ==========================================
+# FUNGSI TEKNIKAL (OTAK AI)
+# ==========================================
 
-timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=1)
-if timeframe == "5m": rec_leverage = "10x - 20x"; max_rec = 20
-elif timeframe == "15m": rec_leverage = "5x - 10x"; max_rec = 10
-else: rec_leverage = "2x - 5x"; max_rec = 5
-
-st.sidebar.info(f"Saran Leverage: **{rec_leverage}**")
-leverage = st.sidebar.slider("Leverage", 1, 50, max_rec) 
-risk_reward = st.sidebar.slider("Risk : Reward", 1.5, 5.0, 2.0)
-
-# --- FUNGSI KONEKSI ---
-@st.cache_data(ttl=3600)
-def get_top_volume_symbols():
+def fetch_data(symbol, timeframe, limit=300):
+    """Mengambil data candle terbaru"""
     try:
-        exchange = ccxt.bitget({'options': {'defaultType': 'swap'}}) 
-        tickers = exchange.fetch_tickers()
-        futures_pairs = []
-        for symbol, data in tickers.items():
-            if '/USDT' in symbol and ':USDT' in symbol:
-                vol = data.get('quoteVolume', 0)
-                if vol is not None: 
-                    futures_pairs.append({'symbol': symbol, 'volume': vol})
-        futures_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        return [x['symbol'] for x in futures_pairs[:30]]
-    except: return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
-
-def get_data(symbol, tf, limit=500):
-    try:
-        exchange = ccxt.bitget({'options': {'defaultType': 'swap'}})
-        bars = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
-        if not bars or len(bars) < 50: return None
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
-    except: return None
+    except Exception as e:
+        logging.error(f"Error fetch data: {e}")
+        return None
 
-# --- OTAK BARU: BOLLINGER REVERSAL STRATEGY (FIXED) ---
-def analyze_symbol(df, risk_reward_ratio):
-    default_ret = ("NEUTRAL", 0, 0, 0, False, 0.0)
-    if df is None or df.empty: return default_ret
+def identify_swings(df, window=3):
+    """Mencari titik High/Low Valid (Structure)"""
+    # Swing High: Titik tertinggi diantara kiri kanan
+    df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
+    df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
+    
+    # Boolean marker
+    df['is_high'] = (df['high'] == df['swing_high'])
+    df['is_low'] = (df['low'] == df['swing_low'])
+    return df
+
+def analyze_market(df):
+    """Analisa chart layaknya trader berpengalaman"""
+    
+    # 1. Indikator Momentum & Trend
+    df['ema200'] = df.ta.ema(length=200)
+    df['atr'] = df.ta.atr(length=14)
+    df['vol_ma'] = df['volume'].rolling(window=20).mean() # Rata-rata Volume
+    
+    # 2. Struktur Pasar
+    df = identify_swings(df, window=3)
+    
+    # Data Candle Terakhir (Confirmed Close)
+    prev = df.iloc[-2]
+    
+    # Cari Swing High & Low TERAKHIR yang VALID (Historical)
+    # Kita cari swing high yg terjadi SEBELUM candle breakout ini
+    # Filter hanya baris yang is_high=True, ambil yang terakhir
+    valid_highs = df[df['is_high'] == True]
+    valid_lows = df[df['is_low'] == True]
+    
+    if valid_highs.empty or valid_lows.empty:
+        return None, 0, 0, 0
+
+    last_swing_high = valid_highs.iloc[-2]['high'] # -2 karena -1 mungkin baru terbentuk
+    last_swing_low = valid_lows.iloc[-2]['low']
+
+    # --- LOGIC FILTER ---
+    is_bull_trend = prev['close'] > prev['ema200']
+    is_bear_trend = prev['close'] < prev['ema200']
+    
+    # Volume Spike Validation (Harus 1.5x rata-rata)
+    is_valid_volume = prev['volume'] > (prev['vol_ma'] * 1.5)
+    
+    # Candle Body Strength (Anti Doji)
+    body = abs(prev['close'] - prev['open'])
+    is_strong_candle = body > (prev['atr'] * 0.5)
+
+    signal = None
+    entry_price = 0
+    sl_price = 0
+    tp_price = 0
+
+    # === LONG SCENARIO ===
+    # Breakout Resistance + Volume Besar + Trend Naik
+    if is_bull_trend and prev['close'] > last_swing_high and is_valid_volume and is_strong_candle:
+        signal = 'LONG'
+        # STRATEGI SNIPER: Limit Order di level Resistance yang jebol (Retest)
+        entry_price = last_swing_high 
+        sl_price = last_swing_low
+        
+        # Safety: Max SL distance 2%
+        if (entry_price - sl_price) / entry_price > RISK_PCT:
+             sl_price = entry_price * (1 - RISK_PCT)
+             
+        tp_price = entry_price + ((entry_price - sl_price) * RR_RATIO)
+
+    # === SHORT SCENARIO ===
+    # Breakdown Support + Volume Besar + Trend Turun
+    elif is_bear_trend and prev['close'] < last_swing_low and is_valid_volume and is_strong_candle:
+        signal = 'SHORT'
+        # STRATEGI SNIPER: Limit Order di level Support yang jebol (Retest)
+        entry_price = last_swing_low
+        sl_price = last_swing_high
+        
+        # Safety: Max SL distance 2%
+        if (sl_price - entry_price) / entry_price > RISK_PCT:
+            sl_price = entry_price * (1 + RISK_PCT)
+            
+        tp_price = entry_price - ((sl_price - entry_price) * RR_RATIO)
+
+    return signal, entry_price, sl_price, tp_price
+
+# ==========================================
+# EKSEKUSI ORDER
+# ==========================================
+
+def set_leverage(symbol, leverage):
+    try:
+        exchange.set_leverage(leverage, symbol)
+        logging.info(f"Leverage set to {leverage}x")
+    except Exception as e:
+        # Kadang error kalau leverage sudah sama, abaikan
+        pass
+
+def place_sniper_order(signal, entry, sl, tp):
+    side = 'buy' if signal == 'LONG' else 'sell'
+    
+    # Hitung jumlah koin berdasarkan margin USDT
+    # Rumus: (Modal * Leverage) / Harga Entry
+    amount = (AMOUNT_USDT * LEVERAGE) / entry
+    
+    logging.info(f"!!! SIGNAL VALID TERDETEKSI: {signal} !!!")
+    logging.info(f"Placing LIMIT Order @ {entry:.4f}")
+    logging.info(f"SL: {sl:.4f} | TP: {tp:.4f}")
     
     try:
-        # 1. Hitung Bollinger Bands
-        bb = ta.bbands(df['close'], length=20, std=2)
+        # 1. Set Leverage
+        set_leverage(SYMBOL, LEVERAGE)
         
-        # FIX: Cari nama kolom secara dinamis (Anti KeyError)
-        # Kita cari kolom yang diawali 'BBL' (Lower), 'BBU' (Upper), 'BBM' (Mid)
-        col_lower = [c for c in bb.columns if c.startswith('BBL')][0]
-        col_upper = [c for c in bb.columns if c.startswith('BBU')][0]
-        col_mid   = [c for c in bb.columns if c.startswith('BBM')][0]
+        # 2. Pasang LIMIT Order (Pending Order)
+        # Note: Bitget params untuk SL/TP bisa berbeda tergantung endpoint, 
+        # ini setup umum CCXT.
+        params = {
+            'stopLoss': {
+                'triggerPrice': sl,
+            },
+            'takeProfit': {
+                'triggerPrice': tp,
+            }
+        }
         
-        # Gabungkan ke DataFrame utama
-        df = pd.concat([df, bb], axis=1)
+        order = exchange.create_order(SYMBOL, 'limit', side, amount, entry, params)
+        logging.info(f"Order Berhasil! ID: {order['id']}")
+        return True
         
-        # 2. Hitung RSI & ATR
-        df['RSI'] = ta.rsi(df['close'], length=14)
-        df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    except: return default_ret
+    except Exception as e:
+        logging.error(f"Gagal Eksekusi Order: {e}")
+        return False
 
-    curr = df.iloc[-1]
-    
-    # Ambil nilai berdasarkan nama kolom dinamis tadi
-    lower_band = curr[col_lower]
-    upper_band = curr[col_upper]
-    mid_band   = curr[col_mid]
-    
-    # Cek Safety Data
-    if pd.isna(lower_band) or pd.isna(curr['RSI']): return default_ret
+# ==========================================
+# MAIN LOOP
+# ==========================================
 
-    signal = "NEUTRAL"; entry = 0.0; sl = 0.0; tp = 0.0
+def main():
+    logging.info(f"Bot Sniper {SYMBOL} dimulai... Timeframe: {TIMEFRAME}")
     
-    # --- LOGIKA REVERSAL ---
+    # State variable agar tidak spam order pada signal yang sama
+    last_processed_time = None
     
-    # LONG: Harga Tembus Bawah + RSI Oversold (<30)
-    if curr['close'] <= lower_band and curr['RSI'] < 30:
-        signal = "LONG"
-        entry = curr['close']
-        sl = entry - (curr['ATR'] * 1.0) 
-        tp = mid_band 
-        # Opsi TP Risk Reward
-        tp_ratio = entry + ((entry - sl) * risk_reward_ratio)
-        if tp_ratio > tp: tp = tp_ratio
-
-    # SHORT: Harga Tembus Atas + RSI Overbought (>70)
-    elif curr['close'] >= upper_band and curr['RSI'] > 70:
-        signal = "SHORT"
-        entry = curr['close']
-        sl = entry + (curr['ATR'] * 1.0)
-        tp = mid_band
-        # Opsi TP Risk Reward
-        tp_ratio = entry - ((sl - entry) * risk_reward_ratio)
-        if tp_ratio < tp: tp = tp_ratio
-
-    # Volume Hype
-    avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
-    volume_spike_ratio = (curr['volume'] / avg_vol) if avg_vol > 0 else 0
-    is_hyped = volume_spike_ratio > 2.0
-    
-    final_signal_label = signal
-    if signal != "NEUTRAL":
-        if is_hyped: final_signal_label = f"{signal} 🔥"
-        else: final_signal_label = f"{signal}"
+    while True:
+        try:
+            df = fetch_data(SYMBOL, TIMEFRAME)
             
-    return final_signal_label, entry, sl, tp, is_hyped, volume_spike_ratio
-
-# --- SCANNER ---
-available_symbols = get_top_volume_symbols()
-
-if scan_button:
-    st.session_state.scan_results = []
-    progress_bar = st.progress(0)
-    temp_results = []
-    
-    status_text = st.empty()
-    status_text.text(f"Mencari Reversal Setup (BB + RSI) - {timeframe}...")
-    
-    for i, sym in enumerate(available_symbols):
-        progress_bar.progress((i + 1) / len(available_symbols))
-        
-        df_scan = get_data(sym, timeframe)
-        if df_scan is not None:
-            sig_label, ent, stop, take, hype_status, vol_ratio = analyze_symbol(df_scan, risk_reward)
+            if df is not None:
+                # Cek waktu candle terakhir
+                current_candle_time = df.iloc[-2]['timestamp']
+                
+                # Jika candle baru sudah close, lakukan analisa
+                if last_processed_time != current_candle_time:
+                    
+                    signal, entry, sl, tp = analyze_market(df)
+                    
+                    if signal:
+                        logging.info(f"Setup ditemukan pada {current_candle_time}")
+                        success = place_sniper_order(signal, entry, sl, tp)
+                        if success:
+                            last_processed_time = current_candle_time # Tandai signal sudah dieksekusi
+                    else:
+                        # Log status pasar sesekali (Optional)
+                        last_price = df.iloc[-1]['close']
+                        logging.info(f"Monitoring... Harga: {last_price} | Tidak ada setup valid.")
+                
+                else:
+                    # Menunggu candle berikutnya close
+                    pass
             
-            if "NEUTRAL" not in sig_label:
-                risk_alert = abs((ent - stop)/ent) * 100 * leverage
-                temp_results.append({
-                    'symbol': sym, 'signal': sig_label, 'entry': ent, 
-                    'sl': stop, 'tp': take, 'risk': risk_alert, 
-                    'vol_ratio': vol_ratio, 'is_hype': hype_status
-                })
-        time.sleep(0.05)
+            # Istirahat 30 detik sebelum cek lagi (Hemat API Call)
+            time.sleep(30)
             
-    st.session_state.scan_results = temp_results
-    st.session_state.last_scan_time = time.strftime("%H:%M:%S")
-    progress_bar.empty()
-    status_text.empty()
+        except KeyboardInterrupt:
+            logging.info("Bot dihentikan manual.")
+            break
+        except Exception as e:
+            logging.error(f"Error di main loop: {e}")
+            time.sleep(10)
 
-# --- TAMPILAN HASIL ---
-st.subheader(f"📡 Hasil Radar Reversal ({timeframe})")
-
-if st.session_state.last_scan_time: st.caption(f"Update: {st.session_state.last_scan_time} WIB")
-
-if len(st.session_state.scan_results) > 0:
-    st.success(f"DITEMUKAN {len(st.session_state.scan_results)} PELUANG REVERSAL:")
-    
-    cols = st.columns([1.5, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
-    cols[0].markdown("**Pair**"); cols[1].markdown("**Sinyal**"); cols[2].markdown("**Entry**")
-    cols[3].markdown("**Stop**"); cols[4].markdown("**Target**"); cols[5].markdown("**Vol**"); cols[6].markdown("**Risk**")
-    st.markdown("---")
-
-    for item in st.session_state.scan_results:
-        cols = st.columns([1.5, 1.5, 1.2, 1.2, 1.2, 1.5, 1])
-        display_name = item['symbol'].replace(":USDT", "")
-        
-        with cols[0]: 
-            if "LONG" in item['signal']: cols[0].markdown(f"🟢 **{display_name}**")
-            else: cols[0].markdown(f"🔴 **{display_name}**")
-        with cols[1]:
-            if item['is_hype']: cols[1].markdown(f"**{item['signal']}**") 
-            else: cols[1].write(f"{item['signal']}")
-        with cols[2]: cols[2].write(f"${item['entry']}")
-        with cols[3]: cols[3].write(f"${item['sl']:.4f}")
-        with cols[4]: cols[4].write(f"${item['tp']:.4f}")
-        with cols[5]:
-            if item['is_hype']: cols[5].metric("Vol", f"{item['vol_ratio']:.1f}x", delta="HYPE", label_visibility="collapsed")
-            else: cols[5].write(f"{item['vol_ratio']:.1f}x")
-        with cols[6]: cols[6].write(f"{item['risk']:.2f}%")
-else:
-    if st.session_state.last_scan_time: st.info("Tidak ada kondisi Overbought/Oversold ekstrem saat ini.")
-    else: st.write("Klik **SCAN** untuk mencari peluang.")
-
-st.markdown("---")
-
-# --- MANUAL CHECK ---
-st.sidebar.markdown("---")
-st.sidebar.header("🔭 Cek Manual")
-selected_symbol = st.sidebar.selectbox("Pilih Koin Futures", available_symbols)
-
-df_main = get_data(selected_symbol, timeframe)
-
-if df_main is not None:
-    main_sig, main_ent, main_sl, main_tp, main_hype, main_vol_ratio = analyze_symbol(df_main, risk_reward)
-    display_name_main = selected_symbol.replace(":USDT", "")
-    
-    st.write(f"### Analisa Reversal: {display_name_main} ({timeframe})")
-    
-    # CHART BOLLINGER
-    # Cari nama kolom lagi untuk plotting
-    try:
-        bb = ta.bbands(df_main['close'], length=20, std=2)
-        col_lower = [c for c in bb.columns if c.startswith('BBL')][0]
-        col_upper = [c for c in bb.columns if c.startswith('BBU')][0]
-        col_mid   = [c for c in bb.columns if c.startswith('BBM')][0]
-        
-        # Gabung sementara untuk plotting
-        df_plot = pd.concat([df_main, bb], axis=1)
-        
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df_plot['time'], open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name='Price'))
-        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_upper], mode='lines', line=dict(color='gray', width=1), name='Upper Band'))
-        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_lower], mode='lines', line=dict(color='gray', width=1), name='Lower Band', fill='tonexty', fillcolor='rgba(200,200,200,0.1)'))
-        fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot[col_mid], mode='lines', line=dict(color='orange', width=1.5), name='Mid Band'))
-        
-        fig.update_layout(height=500, xaxis_rangeslider_visible=False, title=f"Bollinger Bands (20, 2)")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        curr_rsi = df_plot.iloc[-1]['RSI'] if 'RSI' in df_plot.columns else ta.rsi(df_plot['close'], length=14).iloc[-1]
-        st.metric("RSI Momentum", f"{curr_rsi:.2f}", delta="Extremes: <30 or >70")
-        
-    except:
-        st.warning("Data chart tidak cukup untuk menampilkan Bollinger Bands.")
-    
-    # INFO PANEL
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sinyal", main_sig)
-    c2.metric("Vol Power", f"{main_vol_ratio:.1f}x")
-    c3.metric("Entry", f"${main_ent}")
-    c4.metric("Target (Mid Band)", f"${main_tp}")
-    
-    st.metric("Stop Loss (Wajib)", f"${main_sl}", delta_color="inverse")
-    
-    if main_ent > 0:
-        risk_percent = abs((main_ent - main_sl) / main_ent) * 100 * leverage
-        if risk_percent > 5: st.error(f"⛔ RISIKO: {risk_percent:.2f}%")
-        else: st.success(f"✅ RISIKO: {risk_percent:.2f}%")
+if __name__ == "__main__":
+    main()
