@@ -45,7 +45,7 @@ st.markdown("""
 def init_exchange():
     return ccxt.bitget({
         'options': {'defaultType': 'swap'},
-        'timeout': 15000, # Timeout lebih lama karena scan berat
+        'timeout': 20000, # Timeout lebih lama
         'enableRateLimit': True
     })
 
@@ -65,18 +65,29 @@ def get_top_50_coins():
 def fetch_candle_data(symbol, timeframe):
     exchange = init_exchange()
     try:
-        # Limit 300 cukup untuk irit bandwidth (3 TF x 50 Koin = Berat)
-        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=300)
+        # PERBAIKAN 1: Limit dinaikkan ke 1000 agar EMA 200 aman
+        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=1000)
         df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=7) # WIB
         return df
     except: return None
 
 # ==========================================
-# 3. OTAK ANALISA (BISA MENGEMBALIKAN DETAIL)
+# 3. OTAK ANALISA
 # ==========================================
 
 def analyze_tf(df, risk_reward_ratio):
+    # Default Result (Jika data error/kurang)
+    empty_result = {
+        "status": "NEUTRAL", "css": "bg-neutral", 
+        "reason": "Data Kurang", "rsi": "-", "adx": "-",
+        "entry": 0, "sl": 0, "tp": 0
+    }
+
+    # PERBAIKAN 2: Cek apakah data cukup untuk EMA 200
+    if df is None or len(df) < 205:
+        return empty_result
+
     # Indikator
     df['ema200'] = df.ta.ema(length=200)
     df['rsi'] = df.ta.rsi(length=14)
@@ -101,29 +112,31 @@ def analyze_tf(df, risk_reward_ratio):
     valid_highs = df[df['is_high'] == True]
     valid_lows = df[df['is_low'] == True]
     
-    # Default Result
-    result = {
-        "status": "NEUTRAL", "css": "bg-neutral", 
-        "reason": "-", "rsi": f"{curr_rsi:.1f}", "adx": f"{prev['adx']:.1f}",
-        "entry": 0, "sl": 0, "tp": 0
-    }
-
-    if valid_highs.empty or valid_lows.empty: return result
+    if valid_highs.empty or valid_lows.empty: return empty_result
     
     last_swing_high = valid_highs.iloc[-2]['high']
     last_swing_low = valid_lows.iloc[-2]['low']
 
     # 1. Filter ADX
+    # Tambahkan handle NaN jika ADX gagal hitung
     if pd.isna(prev['adx']) or prev['adx'] < 20:
-        result["status"] = "SIDEWAYS"
-        result["reason"] = f"Pasar Lemah (ADX {prev['adx']:.1f})"
-        return result
+        res_adx = empty_result.copy()
+        res_adx["status"] = "SIDEWAYS"
+        res_adx["reason"] = f"Pasar Lemah (ADX {prev['adx']:.1f})" if not pd.isna(prev['adx']) else "ADX Error"
+        return res_adx
 
     # 2. Logic Dasar
+    # Handle NaN pada Volume MA
+    if pd.isna(vol_avg): vol_avg = curr_vol 
+
     is_vol_valid = curr_vol > vol_avg
     is_rsi_rising = curr_rsi > prev_rsi
     is_rsi_falling = curr_rsi < prev_rsi
     vol_str = f"{(curr_vol/vol_avg):.1f}x Vol"
+
+    result = empty_result.copy()
+    result["rsi"] = f"{curr_rsi:.1f}"
+    result["adx"] = f"{prev['adx']:.1f}"
 
     # --- LONG LOGIC ---
     if prev['close'] > prev['ema200'] and prev['close'] > last_swing_high:
@@ -190,7 +203,7 @@ def get_confluence_insight(r15, r1h, r4h):
     elif score == -3:
         return "💎 STRONG DOWNTREND (ALL IN)", "background-color: #f8d7da; color: red; border: 1px solid red;"
     
-    # Divergence (Contoh: 15m Long, tapi 4H Short)
+    # Divergence
     elif "LONG" in r15['status'] and "SHORT" in r4h['status']:
         return "⚠️ SCALPING ONLY (Koreksi Lawan Arus)", "background-color: #fff3cd; color: #856404; border: 1px solid orange;"
     elif "SHORT" in r15['status'] and "LONG" in r4h['status']:
@@ -213,18 +226,22 @@ def run_matrix_scanner(rr_ratio):
     for i, coin in enumerate(top_coins):
         st_text.text(f"Scanning Matrix {i+1}/{total}: {coin}")
         
-        # Scan 3 Timeframe sekaligus
+        # Scan 3 Timeframe
+        # Tambahkan safety check saat fetch data
         df15 = fetch_candle_data(coin, '15m')
         df1h = fetch_candle_data(coin, '1h')
         df4h = fetch_candle_data(coin, '4h')
         
-        if df15 is not None and df1h is not None and df4h is not None:
+        # PERBAIKAN 3: Pastikan semua DataFrame valid dan cukup panjang
+        if (df15 is not None and len(df15) > 200 and 
+            df1h is not None and len(df1h) > 200 and 
+            df4h is not None and len(df4h) > 200):
+            
             res15 = analyze_tf(df15, rr_ratio)
             res1h = analyze_tf(df1h, rr_ratio)
             res4h = analyze_tf(df4h, rr_ratio)
             
-            # Filter: Tampilkan hanya jika ada MINIMAL 1 Sinyal Aktif (Long/Short)
-            # Agar list tidak penuh dengan sampah
+            # Filter: Tampilkan hanya jika ada MINIMAL 1 Sinyal Aktif
             has_signal = any(x in res15['status'] or x in res1h['status'] or x in res4h['status'] for x in ["LONG", "SHORT"])
             
             if has_signal:
@@ -242,7 +259,7 @@ def run_matrix_scanner(rr_ratio):
     return results
 
 # ==========================================
-# 5. UI DISPLAY (KOLOM BERDAMPINGAN)
+# 5. UI DISPLAY
 # ==========================================
 
 st.sidebar.header("🎛️ Radar Matrix")
@@ -267,7 +284,7 @@ else:
         insight = item['insight']
         insight_css = item['insight_css']
         
-        # Header Koin & Strategi
+        # Header Koin
         st.markdown(f"""
         <div class="coin-header">
             {coin} <span class="strategy-tag" style="{insight_css}">{insight}</span>
@@ -277,20 +294,16 @@ else:
         # 3 KOLOM BERDAMPINGAN
         c15, c1h, c4h = st.columns(3)
         
-        # --- Fungsi Helper Tampilan per Kolom ---
         def display_tf_col(col, label, res):
             with col:
                 st.caption(f"⏱️ {label}")
-                # Box Status (Long/Short/Neutral)
                 st.markdown(f'<div class="tf-box {res["css"]}">{res["status"]}</div>', unsafe_allow_html=True)
                 
-                # Detail Angka (RSI/Entry)
                 if "LONG" in res["status"] or "SHORT" in res["status"] or "WAIT" in res["status"]:
                     st.write(f"**Entry:** ${res['entry']:,.4f}")
                     st.write(f"**SL:** ${res['sl']:,.4f}")
                     st.write(f"**TP:** ${res['tp']:,.4f}")
                 
-                # Box Alasan (Why?)
                 st.markdown(f"""
                 <div class="reason-box">
                     <b>Analisa:</b> {res['reason']}<br>
@@ -299,7 +312,6 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
 
-        # Render 3 Kolom
         display_tf_col(c15, "TF 15 Menit (Scalping)", item['15m'])
         display_tf_col(c1h, "TF 1 Jam (Intraday)", item['1h'])
         display_tf_col(c4h, "TF 4 Jam (Swing)", item['4h'])
