@@ -38,14 +38,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MODUL DATA & KONEKSI
+# 2. MODUL DATA & KONEKSI (ANTI-GAGAL)
 # ==========================================
 
 @st.cache_resource
 def init_exchange():
     return ccxt.bitget({
         'options': {'defaultType': 'swap'},
-        'timeout': 20000, # Timeout lebih lama
+        'timeout': 30000, # Timeout diperpanjang jadi 30 detik
         'enableRateLimit': True
     })
 
@@ -64,16 +64,33 @@ def get_top_50_coins():
 
 def fetch_candle_data(symbol, timeframe):
     exchange = init_exchange()
-    try:
-        # PERBAIKAN 1: Limit dinaikkan ke 1000 agar EMA 200 aman
-        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=1000)
-        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=7) # WIB
-        return df
-    except: return None
+    # --- UPDATE: RETRY LOGIC (Coba 3x) ---
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # Limit 1000 agar EMA 200 aman
+            bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=1000)
+            
+            # Jika data kosong, tunggu sebentar & coba lagi
+            if not bars:
+                time.sleep(0.5)
+                continue
+                
+            df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # Timezone WIB (UTC+7)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=7) 
+            return df
+            
+        except Exception as e:
+            # Jika error koneksi, tunggu 1 detik lalu ulang
+            time.sleep(1)
+            if attempt == max_retries - 1:
+                return None # Nyerah setelah 3x gagal
+    return None
 
 # ==========================================
-# 3. OTAK ANALISA
+# 3. OTAK ANALISA (RSI SMOOTHING)
 # ==========================================
 
 def analyze_tf(df, risk_reward_ratio):
@@ -89,8 +106,8 @@ def analyze_tf(df, risk_reward_ratio):
     # --- INDIKATOR ---
     df['ema200'] = df.ta.ema(length=200)
     df['rsi'] = df.ta.rsi(length=14)
-    # FITUR BARU: RSI Smoothing (Rata-rata RSI 9 Candle)
-    df['rsi_ma'] = df['rsi'].rolling(window=9).mean() 
+    # RSI Smoothing (Rata-rata 9 Candle) untuk deteksi arah
+    df['rsi_ma'] = df['rsi'].rolling(window=9).mean()
     
     df['atr'] = df.ta.atr(length=14)
     df['adx'] = df.ta.adx(length=14)['ADX_14']
@@ -103,11 +120,13 @@ def analyze_tf(df, risk_reward_ratio):
     df['is_high'] = (df['high'] == df['swing_high'])
     df['is_low'] = (df['low'] == df['swing_low'])
 
-    # Data Points
-    prev = df.iloc[-2] # Candle Closed
+    # Data Points (Prev = Closed Candle)
+    prev = df.iloc[-2]
     curr_price = df.iloc[-1]['close']
-    curr_rsi = df.iloc[-1]['rsi']
-    prev_rsi_ma = df.iloc[-2]['rsi_ma'] # Rata-rata RSI candle lalu
+    
+    # RSI Data (Closed Candle untuk akurasi)
+    rsi_val_closed = df.iloc[-2]['rsi']
+    rsi_ma_closed = df.iloc[-2]['rsi_ma']
     
     curr_vol = df.iloc[-2]['volume']
     vol_avg = df.iloc[-2]['vol_ma']
@@ -132,18 +151,13 @@ def analyze_tf(df, risk_reward_ratio):
     is_vol_valid = curr_vol > vol_avg
     vol_str = f"{(curr_vol/vol_avg):.1f}x Vol"
 
-    # --- PERBAIKAN LOGIC RSI (SMOOTHING) ---
-    # Rising = RSI di atas rata-ratanya sendiri (Strong Momentum)
-    # Falling = RSI di bawah rata-ratanya sendiri (Weak Momentum)
-    # Kita pakai candle 'prev' (closed) agar tidak tertipu gocekan candle jalan
-    rsi_val_closed = df.iloc[-2]['rsi']
-    rsi_ma_closed = df.iloc[-2]['rsi_ma']
-    
+    # --- LOGIC RSI SMOOTHING ---
+    # Naik = RSI di atas MA-nya. Turun = RSI di bawah MA-nya.
     is_rsi_rising = rsi_val_closed > rsi_ma_closed
     is_rsi_falling = rsi_val_closed < rsi_ma_closed
 
     result = empty_result.copy()
-    result["rsi"] = f"{rsi_val_closed:.1f}" # Tampilkan RSI Close (bukan running)
+    result["rsi"] = f"{rsi_val_closed:.1f}"
     result["adx"] = f"{prev['adx']:.1f}"
 
     # --- LONG LOGIC ---
@@ -151,12 +165,13 @@ def analyze_tf(df, risk_reward_ratio):
         if is_vol_valid:
             entry = curr_price
             
+            # Cek RSI Level
             if rsi_val_closed > 70:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
                 result["reason"] = f"Breakout Valid, tapi RSI Overbought ({rsi_val_closed:.1f})."
                 entry = last_swing_high 
             
-            # Cek Kemiringan RSI (Pakai Logic Baru)
+            # Cek RSI Slope (Smoothing)
             elif not is_rsi_rising:
                 result.update({"status": "WEAK", "css": "bg-wait"})
                 result["reason"] = f"Breakout, tapi RSI Melemah (Di bawah MA-9). Awas Fakeout."
@@ -180,7 +195,6 @@ def analyze_tf(df, risk_reward_ratio):
                 result["reason"] = f"Breakdown Valid, tapi RSI Oversold ({rsi_val_closed:.1f})."
                 entry = last_swing_low
             
-            # Cek Kemiringan RSI (Pakai Logic Baru)
             elif not is_rsi_falling:
                 result.update({"status": "WEAK", "css": "bg-wait"})
                 result["reason"] = f"Breakdown, tapi RSI Menguat (Di atas MA-9). Awas Pantulan."
@@ -240,13 +254,12 @@ def run_matrix_scanner(rr_ratio):
     for i, coin in enumerate(top_coins):
         st_text.text(f"Scanning Matrix {i+1}/{total}: {coin}")
         
-        # Scan 3 Timeframe
-        # Tambahkan safety check saat fetch data
+        # Scan 3 Timeframe dengan Retry Logic di dalamnya
         df15 = fetch_candle_data(coin, '15m')
         df1h = fetch_candle_data(coin, '1h')
         df4h = fetch_candle_data(coin, '4h')
         
-        # PERBAIKAN 3: Pastikan semua DataFrame valid dan cukup panjang
+        # PERBAIKAN: Pastikan DataFrame tidak None
         if (df15 is not None and len(df15) > 200 and 
             df1h is not None and len(df1h) > 200 and 
             df4h is not None and len(df4h) > 200):
@@ -267,6 +280,8 @@ def run_matrix_scanner(rr_ratio):
                 })
         
         pbar.progress((i+1)/total)
+        # UPDATE: Jeda diperlambat (0.3s) agar data full load (tidak error di koin besar)
+        time.sleep(0.3)
     
     pbar.empty()
     st_text.text("Matrix Selesai!")
