@@ -77,35 +77,38 @@ def fetch_candle_data(symbol, timeframe):
 # ==========================================
 
 def analyze_tf(df, risk_reward_ratio):
-    # Default Result (Jika data error/kurang)
+    # Default Result
     empty_result = {
         "status": "NEUTRAL", "css": "bg-neutral", 
         "reason": "Data Kurang", "rsi": "-", "adx": "-",
         "entry": 0, "sl": 0, "tp": 0
     }
 
-    # PERBAIKAN 2: Cek apakah data cukup untuk EMA 200
-    if df is None or len(df) < 205:
-        return empty_result
+    if df is None or len(df) < 205: return empty_result
 
-    # Indikator
+    # --- INDIKATOR ---
     df['ema200'] = df.ta.ema(length=200)
     df['rsi'] = df.ta.rsi(length=14)
+    # FITUR BARU: RSI Smoothing (Rata-rata RSI 9 Candle)
+    df['rsi_ma'] = df['rsi'].rolling(window=9).mean() 
+    
     df['atr'] = df.ta.atr(length=14)
     df['adx'] = df.ta.adx(length=14)['ADX_14']
     df['vol_ma'] = df['volume'].rolling(window=20).mean()
 
-    # Struktur
+    # Struktur Market
     window = 3
     df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
     df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
     df['is_high'] = (df['high'] == df['swing_high'])
     df['is_low'] = (df['low'] == df['swing_low'])
 
-    prev = df.iloc[-2]
+    # Data Points
+    prev = df.iloc[-2] # Candle Closed
     curr_price = df.iloc[-1]['close']
     curr_rsi = df.iloc[-1]['rsi']
-    prev_rsi = df.iloc[-2]['rsi']
+    prev_rsi_ma = df.iloc[-2]['rsi_ma'] # Rata-rata RSI candle lalu
+    
     curr_vol = df.iloc[-2]['volume']
     vol_avg = df.iloc[-2]['vol_ma']
 
@@ -117,45 +120,52 @@ def analyze_tf(df, risk_reward_ratio):
     last_swing_high = valid_highs.iloc[-2]['high']
     last_swing_low = valid_lows.iloc[-2]['low']
 
-    # 1. Filter ADX
-    # Tambahkan handle NaN jika ADX gagal hitung
+    # Filter ADX
     if pd.isna(prev['adx']) or prev['adx'] < 20:
         res_adx = empty_result.copy()
         res_adx["status"] = "SIDEWAYS"
-        res_adx["reason"] = f"Pasar Lemah (ADX {prev['adx']:.1f})" if not pd.isna(prev['adx']) else "ADX Error"
+        res_adx["reason"] = f"Pasar Lemah (ADX {prev['adx']:.1f})"
         return res_adx
 
-    # 2. Logic Dasar
-    # Handle NaN pada Volume MA
+    # Logic Dasar
     if pd.isna(vol_avg): vol_avg = curr_vol 
-
     is_vol_valid = curr_vol > vol_avg
-    is_rsi_rising = curr_rsi > prev_rsi
-    is_rsi_falling = curr_rsi < prev_rsi
     vol_str = f"{(curr_vol/vol_avg):.1f}x Vol"
 
+    # --- PERBAIKAN LOGIC RSI (SMOOTHING) ---
+    # Rising = RSI di atas rata-ratanya sendiri (Strong Momentum)
+    # Falling = RSI di bawah rata-ratanya sendiri (Weak Momentum)
+    # Kita pakai candle 'prev' (closed) agar tidak tertipu gocekan candle jalan
+    rsi_val_closed = df.iloc[-2]['rsi']
+    rsi_ma_closed = df.iloc[-2]['rsi_ma']
+    
+    is_rsi_rising = rsi_val_closed > rsi_ma_closed
+    is_rsi_falling = rsi_val_closed < rsi_ma_closed
+
     result = empty_result.copy()
-    result["rsi"] = f"{curr_rsi:.1f}"
+    result["rsi"] = f"{rsi_val_closed:.1f}" # Tampilkan RSI Close (bukan running)
     result["adx"] = f"{prev['adx']:.1f}"
 
     # --- LONG LOGIC ---
     if prev['close'] > prev['ema200'] and prev['close'] > last_swing_high:
         if is_vol_valid:
             entry = curr_price
-            # Cek RSI Detail
-            if curr_rsi > 70:
+            
+            if rsi_val_closed > 70:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
-                result["reason"] = f"Breakout {last_swing_high:.4f}, tapi RSI Overbought ({curr_rsi:.1f})."
-                entry = last_swing_high # Retest Plan
+                result["reason"] = f"Breakout Valid, tapi RSI Overbought ({rsi_val_closed:.1f})."
+                entry = last_swing_high 
+            
+            # Cek Kemiringan RSI (Pakai Logic Baru)
             elif not is_rsi_rising:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Breakout {last_swing_high:.4f}, tapi RSI Turun."
+                result["reason"] = f"Breakout, tapi RSI Melemah (Di bawah MA-9). Awas Fakeout."
                 entry = last_swing_high
+            
             else:
                 result.update({"status": "LONG", "css": "bg-long"})
-                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} + RSI Naik"
+                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} + RSI Strong"
             
-            # Hitung Level
             sl = entry - (prev['atr'] * 1.5)
             tp = entry + ((entry - sl) * risk_reward_ratio)
             result.update({"entry": entry, "sl": sl, "tp": tp})
@@ -164,17 +174,21 @@ def analyze_tf(df, risk_reward_ratio):
     elif prev['close'] < prev['ema200'] and prev['close'] < last_swing_low:
         if is_vol_valid:
             entry = curr_price
-            if curr_rsi < 30:
+            
+            if rsi_val_closed < 30:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
-                result["reason"] = f"Breakdown {last_swing_low:.4f}, tapi RSI Oversold ({curr_rsi:.1f})."
+                result["reason"] = f"Breakdown Valid, tapi RSI Oversold ({rsi_val_closed:.1f})."
                 entry = last_swing_low
+            
+            # Cek Kemiringan RSI (Pakai Logic Baru)
             elif not is_rsi_falling:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Breakdown {last_swing_low:.4f}, tapi RSI Naik."
+                result["reason"] = f"Breakdown, tapi RSI Menguat (Di atas MA-9). Awas Pantulan."
                 entry = last_swing_low
+            
             else:
                 result.update({"status": "SHORT", "css": "bg-short"})
-                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} + RSI Turun"
+                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} + RSI Weak"
             
             sl = entry + (prev['atr'] * 1.5)
             tp = entry - ((sl - entry) * risk_reward_ratio)
