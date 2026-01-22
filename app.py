@@ -105,9 +105,7 @@ def analyze_tf(df, risk_reward_ratio):
 
     # --- INDIKATOR ---
     df['ema200'] = df.ta.ema(length=200)
-    
-    # === FITUR BARU: EMA 8 (GARIS DISKON) ===
-    df['ema8'] = df.ta.ema(length=8) 
+    df['ema8'] = df.ta.ema(length=8) # Garis Support/Entry
     
     df['rsi'] = df.ta.rsi(length=14)
     df['rsi_ma'] = df['rsi'].rolling(window=9).mean()
@@ -122,13 +120,13 @@ def analyze_tf(df, risk_reward_ratio):
     df['is_high'] = (df['high'] == df['swing_high'])
     df['is_low'] = (df['low'] == df['swing_low'])
 
-    # Data Points (Prev = Closed Candle)
-    prev = df.iloc[-2]
-    curr_price = df.iloc[-1]['close']
+    # Data Points
+    prev = df.iloc[-2] # Candle CLOSED
+    curr_price = df.iloc[-1]['close'] # Harga LIVE
+    curr_rsi = df.iloc[-1]['rsi']     # RSI LIVE
     
-    # === AMBIL DATA EMA 8 ===
-    # Kita ambil EMA 8 dari candle terakhir untuk titik entry limit
-    ema8_val = df.iloc[-1]['ema8'] 
+    # EMA 8 dari candle Closed (Target Entry)
+    ema8_val = df.iloc[-2]['ema8'] 
 
     rsi_val_closed = df.iloc[-2]['rsi']
     rsi_ma_closed = df.iloc[-2]['rsi_ma']
@@ -160,56 +158,74 @@ def analyze_tf(df, risk_reward_ratio):
     is_rsi_falling = rsi_val_closed < rsi_ma_closed
 
     result = empty_result.copy()
-    result["rsi"] = f"{rsi_val_closed:.1f}"
+    result["rsi"] = f"{curr_rsi:.1f}" 
     result["adx"] = f"{prev['adx']:.1f}"
 
-    # --- LONG LOGIC ---
+    # ==============================
+    # 🟢 LONG LOGIC + PROTECTION
+    # ==============================
     if prev['close'] > prev['ema200'] and prev['close'] > last_swing_high:
         if is_vol_valid:
-            # === PERUBAHAN DISINI ===
-            # Entry bukan di Close Price, tapi di EMA 8 (Limit Order)
             entry = ema8_val 
             
-            # Cek RSI Level
+            # PROTEKSI LONG: Jangan Beli jika harga jebol Support EMA 8 ke bawah
+            if curr_price < ema8_val:
+                result.update({"status": "WAIT (DUMP)", "css": "bg-wait"})
+                result["reason"] = f"Harga Jebol Support EMA8 (${ema8_val:.4f}). Jangan Tangkap Pisau Jatuh!"
+                return result
+
+            # Proteksi RSI Longsor
+            if (rsi_val_closed - curr_rsi) > 5:
+                result.update({"status": "WAIT (RSI DROP)", "css": "bg-wait"})
+                result["reason"] = f"RSI Menukik Tajam. Momentum Hilang."
+                return result
+
             if rsi_val_closed > 70:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
-                result["reason"] = f"Breakout Valid, tapi RSI Overbought ({rsi_val_closed:.1f}). Tunggu Retest."
-                entry = last_swing_high # Kalau overbought parah, tunggu di support struktur
-            
-            # Cek RSI Slope
+                result["reason"] = f"RSI Overbought. Tunggu Retest."
+                entry = last_swing_high
             elif not is_rsi_rising:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Harga Naik tapi RSI Turun. Awas Jebakan."
+                result["reason"] = f"RSI Slope Melemah."
                 entry = last_swing_high
-            
             else:
                 result.update({"status": "LONG", "css": "bg-long"})
-                # Info tambahan biar user tau ini Entry Diskon
-                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} (Limit Order @ EMA8)"
+                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} (Limit @ EMA8)"
             
             sl = entry - (prev['atr'] * 1.5)
             tp = entry + ((entry - sl) * risk_reward_ratio)
             result.update({"entry": entry, "sl": sl, "tp": tp})
 
-    # --- SHORT LOGIC ---
+    # ==============================
+    # 🔴 SHORT LOGIC + PROTECTION
+    # ==============================
     elif prev['close'] < prev['ema200'] and prev['close'] < last_swing_low:
         if is_vol_valid:
-            # Entry di EMA 8 (Sell Limit)
             entry = ema8_val 
             
+            # PROTEKSI SHORT: Jangan Jual jika harga tembus Resistance EMA 8 ke atas
+            if curr_price > ema8_val:
+                result.update({"status": "WAIT (PUMP)", "css": "bg-wait"})
+                result["reason"] = f"Harga Tembus Resistance EMA8 (${ema8_val:.4f}). Awas Reversal Naik!"
+                return result
+
+            # Proteksi RSI Melonjak
+            if (curr_rsi - rsi_val_closed) > 5:
+                result.update({"status": "WAIT (RSI PUMP)", "css": "bg-wait"})
+                result["reason"] = f"RSI Melonjak Tajam. Awas Pantulan."
+                return result
+
             if rsi_val_closed < 30:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
-                result["reason"] = f"Breakdown Valid, tapi RSI Oversold ({rsi_val_closed:.1f})."
+                result["reason"] = f"RSI Oversold. Tunggu Retest."
                 entry = last_swing_low
-            
             elif not is_rsi_falling:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Harga Turun tapi RSI Naik. Awas Pantulan."
+                result["reason"] = f"RSI Slope Menguat."
                 entry = last_swing_low
-            
             else:
                 result.update({"status": "SHORT", "css": "bg-short"})
-                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} (Limit Order @ EMA8)"
+                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} (Limit @ EMA8)"
             
             sl = entry + (prev['atr'] * 1.5)
             tp = entry - ((sl - entry) * risk_reward_ratio)
