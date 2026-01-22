@@ -105,10 +105,12 @@ def analyze_tf(df, risk_reward_ratio):
 
     # --- INDIKATOR ---
     df['ema200'] = df.ta.ema(length=200)
-    df['rsi'] = df.ta.rsi(length=14)
-    # RSI Smoothing (Rata-rata 9 Candle) untuk deteksi arah
-    df['rsi_ma'] = df['rsi'].rolling(window=9).mean()
     
+    # === FITUR BARU: EMA 8 (GARIS DISKON) ===
+    df['ema8'] = df.ta.ema(length=8) 
+    
+    df['rsi'] = df.ta.rsi(length=14)
+    df['rsi_ma'] = df['rsi'].rolling(window=9).mean()
     df['atr'] = df.ta.atr(length=14)
     df['adx'] = df.ta.adx(length=14)['ADX_14']
     df['vol_ma'] = df['volume'].rolling(window=20).mean()
@@ -124,7 +126,10 @@ def analyze_tf(df, risk_reward_ratio):
     prev = df.iloc[-2]
     curr_price = df.iloc[-1]['close']
     
-    # RSI Data (Closed Candle untuk akurasi)
+    # === AMBIL DATA EMA 8 ===
+    # Kita ambil EMA 8 dari candle terakhir untuk titik entry limit
+    ema8_val = df.iloc[-1]['ema8'] 
+
     rsi_val_closed = df.iloc[-2]['rsi']
     rsi_ma_closed = df.iloc[-2]['rsi_ma']
     
@@ -151,8 +156,6 @@ def analyze_tf(df, risk_reward_ratio):
     is_vol_valid = curr_vol > vol_avg
     vol_str = f"{(curr_vol/vol_avg):.1f}x Vol"
 
-    # --- LOGIC RSI SMOOTHING ---
-    # Naik = RSI di atas MA-nya. Turun = RSI di bawah MA-nya.
     is_rsi_rising = rsi_val_closed > rsi_ma_closed
     is_rsi_falling = rsi_val_closed < rsi_ma_closed
 
@@ -163,23 +166,26 @@ def analyze_tf(df, risk_reward_ratio):
     # --- LONG LOGIC ---
     if prev['close'] > prev['ema200'] and prev['close'] > last_swing_high:
         if is_vol_valid:
-            entry = curr_price
+            # === PERUBAHAN DISINI ===
+            # Entry bukan di Close Price, tapi di EMA 8 (Limit Order)
+            entry = ema8_val 
             
             # Cek RSI Level
             if rsi_val_closed > 70:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
-                result["reason"] = f"Breakout Valid, tapi RSI Overbought ({rsi_val_closed:.1f})."
-                entry = last_swing_high 
+                result["reason"] = f"Breakout Valid, tapi RSI Overbought ({rsi_val_closed:.1f}). Tunggu Retest."
+                entry = last_swing_high # Kalau overbought parah, tunggu di support struktur
             
-            # Cek RSI Slope (Smoothing)
+            # Cek RSI Slope
             elif not is_rsi_rising:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Breakout, tapi RSI Melemah (Di bawah MA-9). Awas Fakeout."
+                result["reason"] = f"Harga Naik tapi RSI Turun. Awas Jebakan."
                 entry = last_swing_high
             
             else:
                 result.update({"status": "LONG", "css": "bg-long"})
-                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} + RSI Strong"
+                # Info tambahan biar user tau ini Entry Diskon
+                result["reason"] = f"✅ BoS {last_swing_high:.4f} + {vol_str} (Limit Order @ EMA8)"
             
             sl = entry - (prev['atr'] * 1.5)
             tp = entry + ((entry - sl) * risk_reward_ratio)
@@ -188,7 +194,8 @@ def analyze_tf(df, risk_reward_ratio):
     # --- SHORT LOGIC ---
     elif prev['close'] < prev['ema200'] and prev['close'] < last_swing_low:
         if is_vol_valid:
-            entry = curr_price
+            # Entry di EMA 8 (Sell Limit)
+            entry = ema8_val 
             
             if rsi_val_closed < 30:
                 result.update({"status": "WAIT (RSI)", "css": "bg-wait"})
@@ -197,19 +204,18 @@ def analyze_tf(df, risk_reward_ratio):
             
             elif not is_rsi_falling:
                 result.update({"status": "WEAK", "css": "bg-wait"})
-                result["reason"] = f"Breakdown, tapi RSI Menguat (Di atas MA-9). Awas Pantulan."
+                result["reason"] = f"Harga Turun tapi RSI Naik. Awas Pantulan."
                 entry = last_swing_low
             
             else:
                 result.update({"status": "SHORT", "css": "bg-short"})
-                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} + RSI Weak"
+                result["reason"] = f"✅ BoS {last_swing_low:.4f} + {vol_str} (Limit Order @ EMA8)"
             
             sl = entry + (prev['atr'] * 1.5)
             tp = entry - ((sl - entry) * risk_reward_ratio)
             result.update({"entry": entry, "sl": sl, "tp": tp})
 
     return result
-
 # ==========================================
 # 4. SCANNER MULTI-TIMEFRAME
 # ==========================================
