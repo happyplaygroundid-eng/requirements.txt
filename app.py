@@ -8,26 +8,28 @@ from datetime import datetime
 # ==========================================
 # 1. KONFIGURASI HALAMAN
 # ==========================================
-st.set_page_config(layout="wide", page_title="Smart Trend System", page_icon="🧠")
+st.set_page_config(layout="wide", page_title="Radar Bunker Mode", page_icon="🛡️")
 
-if 'scan_results' not in st.session_state:
-    st.session_state.scan_results = []
+if 'matrix_results' not in st.session_state:
+    st.session_state.matrix_results = []
 
 # CSS Styles
 st.markdown("""
 <style>
-    .big-font { font-size:16px !important; font-weight: bold; }
-    .tf-box { padding: 8px; border-radius: 5px; margin-bottom: 5px; text-align: center; color: white; font-weight: bold; font-size: 12px; }
-    .bg-long { background-color: #198754; border: 1px solid #146c43; } 
-    .bg-short { background-color: #dc3545; border: 1px solid #b02a37; } 
+    .big-font { font-size:18px !important; font-weight: bold; }
+    .tf-box { padding: 10px; border-radius: 8px; margin-bottom: 5px; text-align: center; color: white; font-weight: bold; }
+    .bg-long { background-color: #198754; border: 2px solid #146c43; } /* Hijau Pekat */
+    .bg-short { background-color: #dc3545; border: 2px solid #b02a37; } /* Merah Pekat */
+    .bg-wait { background-color: #ffc107; color: black; }
     .bg-neutral { background-color: #6c757d; color: white; }
-    .reason-box { font-size: 11px; background-color: #f0f2f6; padding: 10px; border-radius: 5px; border-left: 3px solid #333; margin-top: 5px; color: #333; }
-    .coin-header { font-size: 20px; font-weight: bold; color: #111; margin-top: 10px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+    .reason-box { font-size: 12px; background-color: #f8f9fa; padding: 8px; border-radius: 5px; border: 1px solid #dee2e6; margin-top: 5px; }
+    .coin-header { font-size: 24px; font-weight: bold; color: #333; margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+    .strategy-tag { display: inline-block; padding: 5px 10px; border-radius: 15px; font-weight: bold; font-size: 14px; margin-left: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MODUL DATA (Robust & Anti-Error)
+# 2. MODUL DATA (ANTI-GAGAL)
 # ==========================================
 
 @st.cache_resource
@@ -51,284 +53,245 @@ def get_top_50_coins():
         return [coin['symbol'] for coin in sorted_coins]
     except: return []
 
-def fetch_candle_data(symbol, timeframe, limit=300):
+def fetch_candle_data(symbol, timeframe):
     exchange = init_exchange()
-    for _ in range(3): # Retry 3x
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if not bars: 
+            bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
+            if not bars:
                 time.sleep(0.5)
                 continue
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + pd.Timedelta(hours=7) 
             return df
-        except: time.sleep(0.5)
+        except:
+            time.sleep(1)
+            if attempt == max_retries - 1: return None
     return None
 
 # ==========================================
-# 3. OTAK ANALISA (SMART TREND LOGIC)
+# 3. OTAK ANALISA (STRICT / BUNKER MODE)
 # ==========================================
 
-def check_trend_alignment(symbol):
-    """
-    Cek Trend di TF Besar (1H & 4H) dengan Error Handling Ketat.
-    """
-    try:
-        # 1. CEK 4H TREND
-        # Limit 300 agar EMA 200 pasti aman
-        df4h = fetch_candle_data(symbol, '4h', limit=300)
-        
-        # Validasi Data Kosong/Kurang
-        if df4h is None or len(df4h) < 205: return 'CONFLICT'
-        
-        # Hitung EMA
-        ema50_s = df4h.ta.ema(length=50)
-        ema200_s = df4h.ta.ema(length=200)
-        
-        # Pastikan EMA berhasil dihitung
-        if ema50_s is None or ema200_s is None: return 'CONFLICT'
-        
-        # Ambil nilai terakhir & paksa jadi float (Anti-Ambiguous Error)
-        v50 = float(ema50_s.iloc[-1])
-        v200 = float(ema200_s.iloc[-1])
-        
-        # Cek NaN (Koin baru listing biasanya NaN di EMA200)
-        if pd.isna(v50) or pd.isna(v200): return 'CONFLICT'
-        
-        trend_4h = "UP" if v50 > v200 else "DOWN"
+def analyze_tf(df, risk_reward_ratio):
+    empty_result = {
+        "status": "NEUTRAL", "css": "bg-neutral", 
+        "reason": "Data Kurang", "rsi": "-", "adx": "-",
+        "entry": 0, "sl": 0, "tp": 0
+    }
 
-        # 2. CEK 1H TREND
-        df1h = fetch_candle_data(symbol, '1h', limit=300)
-        if df1h is None or len(df1h) < 205: return 'CONFLICT'
-        
-        ema50_1h_s = df1h.ta.ema(length=50)
-        ema200_1h_s = df1h.ta.ema(length=200)
-        
-        if ema50_1h_s is None or ema200_1h_s is None: return 'CONFLICT'
-        
-        v50_1h = float(ema50_1h_s.iloc[-1])
-        v200_1h = float(ema200_1h_s.iloc[-1])
-        
-        if pd.isna(v50_1h) or pd.isna(v200_1h): return 'CONFLICT'
-        
-        trend_1h = "UP" if v50_1h > v200_1h else "DOWN"
+    if df is None or len(df) < 200: return empty_result
 
-        # 3. KONKLUSI
-        if trend_4h == "UP" and trend_1h == "UP":
-            return "BULLISH"
-        elif trend_4h == "DOWN" and trend_1h == "DOWN":
-            return "BEARISH"
-        else:
-            return "CONFLICT"
-            
-    except Exception as e:
-        # Jika error aneh, anggap conflict biar bot gak crash
-        # print(f"Error checking trend for {symbol}: {e}")
-        return "CONFLICT"
-
-def analyze_entry_setup(df, trend_bias, rr_ratio):
-    # Safety Check
-    if df is None or len(df) < 200: return None
-
-    # --- INDICATORS ---
-    df['ema50'] = df.ta.ema(length=50)
+    # Indikator
     df['ema200'] = df.ta.ema(length=200)
+    df['ema50']  = df.ta.ema(length=50) # Filter Tren Menengah
+    
     df['rsi'] = df.ta.rsi(length=14)
+    df['rsi_ma'] = df['rsi'].rolling(window=9).mean()
+    
     df['atr'] = df.ta.atr(length=14)
     df['adx'] = df.ta.adx(length=14)['ADX_14']
     df['vol_ma'] = df['volume'].rolling(window=20).mean()
-    
-    # MACD
-    macd = df.ta.macd(fast=12, slow=26, signal=9)
-    # Handle jika MACD gagal hitung (kadang return None)
-    if macd is None: return None
-    df['macd_hist'] = macd['MACDh_12_26_9']
-    
-    # Market Structure (Swing)
-    window = 5
+
+    # Market Structure
+    window = 3
     df['swing_high'] = df['high'].rolling(window=window*2+1, center=True).max()
     df['swing_low'] = df['low'].rolling(window=window*2+1, center=True).min()
+    df['is_high'] = (df['high'] == df['swing_high'])
+    df['is_low'] = (df['low'] == df['swing_low'])
 
-    # Data Terakhir
-    curr = df.iloc[-1]
-    prev = df.iloc[-2] # Candle Closed (Validasi Sinyal)
+    # Data Points
+    prev = df.iloc[-2] # Candle Closed
+    curr_price = df.iloc[-1]['close'] # Harga Running
     
-    # Validasi NaN pada Swing
-    swing_h_series = df['swing_high'].dropna()
-    swing_l_series = df['swing_low'].dropna()
+    # Values
+    rsi_val = df.iloc[-2]['rsi']
+    adx_val = prev['adx']
+    ema200_val = prev['ema200']
+    ema50_val = prev['ema50']
     
-    if swing_h_series.empty or swing_l_series.empty: return None
+    curr_vol = df.iloc[-2]['volume']
+    vol_avg = df.iloc[-2]['vol_ma']
 
-    last_swing_high = swing_h_series.iloc[-2] if len(swing_h_series) > 1 else prev['high']
-    last_swing_low = swing_l_series.iloc[-2] if len(swing_l_series) > 1 else prev['low']
-
-    # --- RULES ---
+    valid_highs = df[df['is_high'] == True]
+    valid_lows = df[df['is_low'] == True]
     
-    # 1. Filter ADX (Market Hidup?)
-    if pd.isna(prev['adx']) or prev['adx'] < 20:
-        return {"status": "NO TRADE", "reason": f"ADX Lemah ({prev['adx']:.1f}). Market Mati."}
-
-    # 2. Filter Candle Size (Anti FOMO / Fake Move)
-    candle_body = abs(prev['close'] - prev['open'])
-    if candle_body > (1.5 * prev['atr']):
-         return {"status": "NO TRADE", "reason": f"Candle Volatile (>1.5x ATR). Jangan Kejar Pucuk."}
-
-    # 3. Volume Check
-    if pd.isna(prev['vol_ma']): prev_vol_ma = prev['volume']
-    else: prev_vol_ma = prev['vol_ma']
+    if valid_highs.empty or valid_lows.empty: return empty_result
     
-    if prev['volume'] <= prev_vol_ma:
-        return {"status": "NO TRADE", "reason": "Volume Breakout Kecil. Rawan Fakeout."}
+    last_swing_high = valid_highs.iloc[-2]['high']
+    last_swing_low = valid_lows.iloc[-2]['low']
 
-    # 4. Momentum MACD
-    # Pastikan data cukup untuk compare MACD
-    if len(df) < 5: return None
-    macd_val = prev['macd_hist']
-    macd_prev = df.iloc[-3]['macd_hist']
-    
-    macd_rising = macd_val > macd_prev
-    macd_falling = macd_val < macd_prev
+    # --- STRICT FILTER 1: ADX (Kekuatan Tren) ---
+    # Naikkan Threshold jadi 25. Di bawah 25 = MARKET SAMPAH / CHOPPY.
+    if pd.isna(adx_val) or adx_val < 25:
+        res_adx = empty_result.copy()
+        res_adx["status"] = "CHOPPY"
+        res_adx["css"] = "bg-neutral"
+        res_adx["reason"] = f"ADX Lemah ({adx_val:.1f}). Market Rawan Fakeout."
+        return res_adx
 
-    # Ambil nilai skalar untuk EMA & RSI biar aman
-    p_close = float(prev['close'])
-    p_ema50 = float(prev['ema50'])
-    p_rsi = float(prev['rsi'])
+    # --- STRICT FILTER 2: VOLUME ---
+    # Wajib ada ledakan volume. Kalau volume sepi, jangan masuk.
+    if pd.isna(vol_avg): vol_avg = curr_vol 
+    vol_ratio = curr_vol / vol_avg
+    if vol_ratio < 1.2: # Minimal 1.2x rata-rata
+        res_vol = empty_result.copy()
+        res_vol["status"] = "LOW VOL"
+        res_vol["reason"] = f"Volume Sepi ({vol_ratio:.1f}x). Rawan Jebakan."
+        return res_vol
 
-    # === LOGIC LONG ===
-    if trend_bias == "BULLISH":
-        if p_close > p_ema50 and p_close > last_swing_high:
-            if 40 <= p_rsi <= 65: 
-                if macd_rising:
-                    entry = float(curr['close'])
-                    sl = entry - (prev['atr'] * 2.0)
-                    tp = entry + ((entry - sl) * rr_ratio)
-                    return {
-                        "status": "LONG", "css": "bg-long",
-                        "entry": entry, "sl": sl, "tp": tp,
-                        "reason": f"✅ Trend 1H/4H Bullish + RSI {p_rsi:.1f} + MACD Rising"
-                    }
-                else:
-                    return {"status": "WAIT", "reason": "Trend Bullish, tapi MACD Melemah."}
-            else:
-                 return {"status": "WAIT", "reason": f"RSI {p_rsi:.1f} tidak ideal (Target 40-65)."}
+    result = empty_result.copy()
+    result["rsi"] = f"{rsi_val:.1f}"
+    result["adx"] = f"{adx_val:.1f}"
 
-    # === LOGIC SHORT ===
-    elif trend_bias == "BEARISH":
-        if p_close < p_ema50 and p_close < last_swing_low:
-            if 35 <= p_rsi <= 60:
-                if macd_falling:
-                    entry = float(curr['close'])
-                    sl = entry + (prev['atr'] * 2.0)
-                    tp = entry - ((sl - entry) * rr_ratio)
-                    return {
-                        "status": "SHORT", "css": "bg-short",
-                        "entry": entry, "sl": sl, "tp": tp,
-                        "reason": f"✅ Trend 1H/4H Bearish + RSI {p_rsi:.1f} + MACD Falling"
-                    }
-                else:
-                    return {"status": "WAIT", "reason": "Trend Bearish, tapi MACD Menguat."}
-            else:
-                return {"status": "WAIT", "reason": f"RSI {p_rsi:.1f} tidak ideal (Target 35-60)."}
+    # ==========================================
+    # LOGIC LONG (SUPER KETAT)
+    # ==========================================
+    # Syarat: Harga > EMA 200 DAN Harga > EMA 50 (Double Filter)
+    if prev['close'] > ema200_val and prev['close'] > ema50_val and prev['close'] > last_swing_high:
+        
+        # RSI harus di atas 50 (Zona Bullish Kuat) tapi di bawah 75
+        if rsi_val > 50 and rsi_val < 75:
+            entry = curr_price
+            result.update({"status": "LONG", "css": "bg-long"})
+            result["reason"] = f"✅ Strong Trend (Above EMA50+200) + Vol {vol_ratio:.1f}x"
+            
+            sl = entry - (prev['atr'] * 2.0) # SL Diperlebar sedikit biar gak kejilat
+            tp = entry + ((entry - sl) * risk_reward_ratio)
+            result.update({"entry": entry, "sl": sl, "tp": tp})
+        else:
+            result.update({"status": "WAIT", "css": "bg-wait"})
+            result["reason"] = f"Setup Long tapi RSI {rsi_val:.1f} (Kurang Power/Overbought)"
 
-    return {"status": "NEUTRAL", "reason": "Menunggu Setup Struktur Market."}
+    # ==========================================
+    # LOGIC SHORT (SUPER KETAT)
+    # ==========================================
+    # Syarat: Harga < EMA 200 DAN Harga < EMA 50 (Double Filter)
+    elif prev['close'] < ema200_val and prev['close'] < ema50_val and prev['close'] < last_swing_low:
+        
+        # RSI harus di bawah 50 (Zona Bearish Kuat) tapi di atas 25
+        if rsi_val < 50 and rsi_val > 25:
+            entry = curr_price
+            result.update({"status": "SHORT", "css": "bg-short"})
+            result["reason"] = f"✅ Strong Downtrend (Below EMA50+200) + Vol {vol_ratio:.1f}x"
+            
+            sl = entry + (prev['atr'] * 2.0)
+            tp = entry - ((sl - entry) * risk_reward_ratio)
+            result.update({"entry": entry, "sl": sl, "tp": tp})
+        else:
+            result.update({"status": "WAIT", "css": "bg-wait"})
+            result["reason"] = f"Setup Short tapi RSI {rsi_val:.1f} (Kurang Power/Oversold)"
+
+    return result
 
 # ==========================================
-# 4. SCANNER LOOP
+# 4. SCANNER
 # ==========================================
 
-def run_smart_scanner(rr_ratio):
+def get_confluence_insight(r15, r1h, r4h):
+    score = 0
+    # Hanya hitung jika status benar-benar LONG/SHORT (bukan WAIT/CHOPPY)
+    for r in [r15, r1h, r4h]:
+        if r['status'] == "LONG": score += 1
+        if r['status'] == "SHORT": score -= 1
+
+    if score >= 2: # Minimal 2 TF Confirm
+        return "💎 CONFIRMED UPTREND", "background-color: #198754; color: white; border: 2px solid #0f5132;"
+    elif score <= -2:
+        return "💎 CONFIRMED DOWNTREND", "background-color: #dc3545; color: white; border: 2px solid #842029;"
+    elif abs(score) == 1:
+        return "⚠️ WEAK SIGNAL (Risky)", "background-color: #fff3cd; color: #664d03; border: 1px solid orange;"
+    else:
+        return "⚪ NO TRADE ZONE", "background-color: #f8f9fa; border: 1px solid #ddd;"
+
+def run_matrix_scanner(rr_ratio, show_all):
     top_coins = get_top_50_coins()
     results = []
     
     if not top_coins: return []
-    
+
     pbar = st.sidebar.progress(0)
-    status_text = st.sidebar.empty()
+    st_text = st.sidebar.empty()
     
     total = len(top_coins)
-    
     for i, coin in enumerate(top_coins):
-        status_text.text(f"Scanning: {coin}...")
+        st_text.text(f"Scanning Bunker Mode {i+1}/{total}: {coin}")
         
-        # 1. CEK TREND BESAR
-        trend_bias = check_trend_alignment(coin)
+        df15 = fetch_candle_data(coin, '15m')
+        df1h = fetch_candle_data(coin, '1h')
+        df4h = fetch_candle_data(coin, '4h')
         
-        if trend_bias != "CONFLICT":
-            # 2. Cek Setup di 15m
-            df15m = fetch_candle_data(coin, '15m')
+        if (df15 is not None and len(df15) > 200 and 
+            df1h is not None and len(df1h) > 200 and 
+            df4h is not None and len(df4h) > 200):
             
-            if df15m is not None:
-                setup = analyze_entry_setup(df15m, trend_bias, rr_ratio)
-                
-                if setup and setup.get("status") in ["LONG", "SHORT"]:
-                    results.append({
-                        "symbol": coin,
-                        "trend": trend_bias,
-                        "setup": setup
-                    })
+            res15 = analyze_tf(df15, rr_ratio)
+            res1h = analyze_tf(df1h, rr_ratio)
+            res4h = analyze_tf(df4h, rr_ratio)
+            
+            # Tampilkan jika minimal ada 1 sinyal VALID (Long/Short)
+            # Filter yang Statusnya WAIT/CHOPPY/LOW VOL tidak akan muncul kecuali Show All
+            has_signal = any(x == "LONG" or x == "SHORT" for x in [res15['status'], res1h['status'], res4h['status']])
+            
+            if has_signal or show_all:
+                insight, insight_css = get_confluence_insight(res15, res1h, res4h)
+                results.append({
+                    "symbol": coin, "15m": res15, "1h": res1h, "4h": res4h,
+                    "insight": insight, "insight_css": insight_css
+                })
         
         pbar.progress((i+1)/total)
-        # Jeda sedikit agar tidak kena limit
-        time.sleep(0.1)
+        time.sleep(0.2)
     
     pbar.empty()
-    status_text.text("Analisa Selesai!")
+    st_text.text("Scan Selesai!")
     return results
 
 # ==========================================
 # 5. UI DISPLAY
 # ==========================================
 
-st.sidebar.header("🧠 Smart Trend System")
-st.sidebar.caption("Trend 1H+4H Filter | RSI Pullback | MACD | ADX")
+st.sidebar.header("🛡️ Radar Bunker Mode")
+st.sidebar.caption("Filter diperketat untuk menghindari Market Choppy/Fakeout.")
 rr_ratio = st.sidebar.slider("💰 RR Ratio", 1.0, 5.0, 2.0, 0.1)
+show_all = st.sidebar.checkbox("🛠️ Tampilkan Semua (Termasuk Choppy)", value=False)
 
-if st.sidebar.button("🚀 CARI SETUP TREND FOLLOWING"):
-    st.session_state.scan_results = []
-    with st.spinner("Memfilter Trend & Struktur Market..."):
-        st.session_state.scan_results = run_smart_scanner(rr_ratio)
+if st.sidebar.button("🚀 SCAN MARKET"):
+    st.session_state.matrix_results = []
+    with st.spinner("Mencari Setup Probabilitas Tinggi..."):
+        st.session_state.matrix_results = run_matrix_scanner(rr_ratio, show_all)
 
-st.title("🧠 Smart Trend: High Probability Setup")
+st.title("🛡️ Radar Bunker Mode: High Quality Only")
 
-if st.session_state.scan_results:
-    data = st.session_state.scan_results
-    st.success(f"Ditemukan {len(data)} Koin yang Searah Trend!")
+if st.session_state.matrix_results:
+    data = st.session_state.matrix_results
+    st.success(f"Ditemukan {len(data)} Koin")
     
     for item in data:
         coin = item['symbol']
-        trend = item['trend']
-        setup = item['setup']
-        
-        trend_color = "green" if trend == "BULLISH" else "red"
+        insight = item['insight']
+        insight_css = item['insight_css']
         
         st.markdown(f"""
-        <div class="coin-header">
-            {coin} 
-            <span style="color:{trend_color}; font-size: 14px; margin-left: 10px;">
-                Trend Utama (1H & 4H): {trend}
-            </span>
-        </div>
+        <div class="coin-header">{coin} <span class="strategy-tag" style="{insight_css}">{insight}</span></div>
         """, unsafe_allow_html=True)
         
-        c1, c2 = st.columns([1, 3])
+        c15, c1h, c4h = st.columns(3)
         
-        with c1:
-            st.markdown(f'<div class="tf-box {setup["css"]}" style="font-size: 18px;">{setup["status"]}</div>', unsafe_allow_html=True)
-            st.write(f"**Entry:** ${setup['entry']:,.4f}")
-            st.write(f"**SL:** ${setup['sl']:,.4f}")
-            st.write(f"**TP:** ${setup['tp']:,.4f}")
-            
-        with c2:
-            st.markdown(f"""
-            <div class="reason-box">
-                <b>📋 Ceklist Strategi:</b><br>
-                1. Trend 4H & 1H Searah? <span style="color:green">YES ({trend})</span><br>
-                2. Market Structure Break? <span style="color:green">YES</span><br>
-                3. RSI Pullback Valid? <span style="color:green">YES</span><br>
-                4. Logic: {setup['reason']}
-            </div>
-            """, unsafe_allow_html=True)
-        
+        def display_tf_col(col, label, res):
+            with col:
+                st.caption(f"⏱️ {label}")
+                st.markdown(f'<div class="tf-box {res["css"]}">{res["status"]}</div>', unsafe_allow_html=True)
+                if res["status"] in ["LONG", "SHORT"]:
+                    st.write(f"**Entry:** ${res['entry']:,.4f}")
+                    st.write(f"**SL:** ${res['sl']:,.4f}")
+                    st.write(f"**TP:** ${res['tp']:,.4f}")
+                st.markdown(f"""<div class="reason-box">{res['reason']}<br>RSI: {res['rsi']} | ADX: {res['adx']}</div>""", unsafe_allow_html=True)
+
+        display_tf_col(c15, "TF 15m", item['15m'])
+        display_tf_col(c1h, "TF 1H", item['1h'])
+        display_tf_col(c4h, "TF 4H", item['4h'])
 else:
     if st.button("Tidak ada hasil?"):
-        st.info("Market saat ini sedang 'Conflict' (Trend 1H & 4H tidak searah) atau Sideways. Bot menolak entry demi keamanan modal.")
+        st.warning("Market sedang SANGAT BURUK (Choppy). Bot menyembunyikan sinyal berbahaya. Centang 'Tampilkan Semua' di sidebar jika ingin melihat detailnya.")
